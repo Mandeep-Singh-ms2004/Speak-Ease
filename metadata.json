@@ -1,0 +1,9 @@
+{
+  "name": "SpeakEase - Accessibility Bridge",
+  "description": "A communication suite for the deaf and mute, featuring AI sign language recognition, text-to-speech, and emergency SOS services.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
