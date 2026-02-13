@@ -1,9 +1,18 @@
 {
-  "name": "SpeakEase - Accessibility Bridge",
-  "description": "A communication suite for the deaf and mute, featuring AI sign language recognition, text-to-speech, and emergency SOS services.",
+  "name": "SpeakEase - AI Accessibility Bridge",
+  "short_name": "SpeakEase",
+  "description": "An interactive communication suite for individuals with speech and hearing impairments. Features real-time AI sign language recognition, multimodal translation, and location-based emergency discovery.",
+  "version": "8.0.0",
+  "categories": [
+    "Accessibility",
+    "Communication",
+    "AI"
+  ],
   "requestFramePermissions": [
     "camera",
     "microphone",
     "geolocation"
-  ]
+  ],
+  "theme_color": "#4f46e5",
+  "background_color": "#020617"
 }
