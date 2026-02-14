@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AppLanguage, User, QuickPhrase } from './types';
 import { QUICK_PHRASES, APP_MODES, TOP_LANGUAGES, SUPPORTED_LANGUAGES, AppMode, UI_TRANSLATIONS } from './constants';
-import { interpretSignLanguage, translateText, getLanguageFromLocation, fetchUITranslations, findLanguageDetails, transliterateText, getNearbyPlaces } from './services/geminiService';
+import { interpretSignLanguage, translateText, getLanguageFromLocation, fetchUITranslations, findLanguageDetails, transliterateText, getNearbyPlaces, reverseGeocode } from './services/geminiService';
 
 type Theme = 'light' | 'dark' | 'system';
 type AuthStep = 'select' | 'phone' | 'otp';
@@ -35,7 +35,7 @@ const Modal: React.FC<{
           <h3 className="text-2xl font-black text-gray-900 dark:text-white tracking-tighter">{title}</h3>
           <button onClick={onClose} className="w-10 h-10 flex items-center justify-center bg-gray-100 dark:bg-slate-800 rounded-full text-gray-500">✕</button>
         </div>
-        <div className="w-full">{children}</div>
+        <div className="w-full h-full max-h-[60vh] overflow-y-auto custom-scrollbar">{children}</div>
       </div>
     </div>
   );
@@ -158,7 +158,8 @@ const App: React.FC = () => {
   const [isLiveScanning, setIsLiveScanning] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('speakease-theme') as Theme) || 'system');
-  const [isLocating, setIsLocating] = useState(false);
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>(() => localStorage.getItem('speakease-voice-uri') || '');
   const [customPhrases, setCustomPhrases] = useState<QuickPhrase[]>(() => {
     const saved = localStorage.getItem('speakease-custom-phrases');
     return saved ? JSON.parse(saved) : QUICK_PHRASES;
@@ -168,14 +169,12 @@ const App: React.FC = () => {
   // --- Feature States ---
   const [authStep, setAuthStep] = useState<AuthStep>('select');
   const [isAuthLoading, setIsAuthLoading] = useState(false);
-  const [phoneInput, setPhoneInput] = useState('');
-  const [otpInput, setOtpInput] = useState('');
   const [isPhoneticEnabled, setIsPhoneticEnabled] = useState(false);
   const [keyboardSuggestions, setKeyboardSuggestions] = useState<string[]>([]);
   const [nearbyResults, setNearbyResults] = useState<{ text: string, links: any[] } | null>(null);
   const [isNearbyLoading, setIsNearbyLoading] = useState(false);
   const [currentCoords, setCurrentCoords] = useState<{ lat: number, lng: number } | null>(null);
-  const [modalType, setModalType] = useState<'add_lang' | 'add_phrase' | 'none'>('none');
+  const [modalType, setModalType] = useState<'add_lang' | 'add_phrase' | 'voice_settings' | 'none'>('none');
   const [modalInput, setModalInput] = useState('');
   
   const transliterateDebounceRef = useRef<any>(null);
@@ -211,6 +210,28 @@ const App: React.FC = () => {
     fetchDynamic();
   }, [lang]);
 
+  // Handle available voices
+  useEffect(() => {
+    const updateVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      setAvailableVoices(voices);
+    };
+    updateVoices();
+    window.speechSynthesis.onvoiceschanged = updateVoices;
+    return () => { window.speechSynthesis.onvoiceschanged = null; };
+  }, []);
+
+  // Filter voices for current language
+  const languageVoices = useMemo(() => {
+    return availableVoices.filter(v => v.lang.startsWith(lang.code.split('-')[0]));
+  }, [availableVoices, lang]);
+
+  // Current voice display name
+  const currentVoiceName = useMemo(() => {
+    const voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
+    return voice ? voice.name : 'System Default';
+  }, [availableVoices, selectedVoiceURI]);
+
   // --- Side Effects ---
   useEffect(() => {
     localStorage.setItem('speakease-custom-phrases', JSON.stringify(customPhrases));
@@ -227,6 +248,10 @@ const App: React.FC = () => {
     if (isDark) root.classList.add('dark'); else root.classList.remove('dark');
     localStorage.setItem('speakease-theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (selectedVoiceURI) localStorage.setItem('speakease-voice-uri', selectedVoiceURI);
+  }, [selectedVoiceURI]);
 
   // Reset inputs when switching modes
   useEffect(() => {
@@ -298,8 +323,14 @@ const App: React.FC = () => {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = lang.code;
     utterance.rate = 1.0;
-    const voices = window.speechSynthesis.getVoices();
-    const voice = voices.find(v => v.lang.startsWith(lang.code.split('-')[0])) || voices[0];
+    
+    // Select preferred voice
+    let voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
+    if (!voice) {
+      // Fallback to language default
+      voice = availableVoices.find(v => v.lang.startsWith(lang.code.split('-')[0])) || availableVoices[0];
+    }
+    
     if (voice) utterance.voice = voice;
     window.speechSynthesis.speak(utterance);
     if ("vibrate" in navigator) navigator.vibrate(50);
@@ -338,7 +369,6 @@ const App: React.FC = () => {
     recognition.start();
   };
 
-  // Fixed missing captureAndInterpret function
   const captureAndInterpret = async () => {
     if (!videoRef.current || !canvasRef.current || isSignLoading) return;
     setIsSignLoading(true);
@@ -408,7 +438,8 @@ const App: React.FC = () => {
             <button onClick={() => setAuthStep('phone')} className="w-full bg-slate-900 text-white border border-slate-800 p-6 rounded-[2.5rem] font-black text-lg flex items-center justify-center space-x-4 active:scale-95 transition-all bento-card">
               <span>📱 Phone Login</span>
             </button>
-            <button onClick={loginAsGuest} className="w-full text-slate-600 p-4 font-black text-xs uppercase tracking-[0.3em] hover:text-white transition-colors">
+            {/* Fixed the invalid 'loginAsGuest' attribute from the button element */}
+            <button className="w-full text-slate-600 p-4 font-black text-xs uppercase tracking-[0.3em] hover:text-white transition-colors" onClick={loginAsGuest}>
               Continue as Guest
             </button>
           </div>
@@ -419,14 +450,40 @@ const App: React.FC = () => {
 
   // --- Main Mode Views ---
   const renderHome = () => (
-    <div className="p-6 space-y-10 pb-24 min-h-full">
-      <header className="space-y-1">
-        <h2 className="text-4xl font-black tracking-tight dark:text-white">
-          {t('welcome', 'Hello')}, {user?.name.split(' ')[0]}
-          {isTranslatingUI && <span className="ml-2 w-2 h-2 inline-block bg-indigo-500 rounded-full animate-ping" />}
-        </h2>
-        <p className="text-gray-400 font-bold text-[11px] uppercase tracking-[0.2em]">{t('ready_assist', 'Ready to Assist')}</p>
+    <div className="p-6 space-y-6 pb-24 min-h-full">
+      <header className="flex justify-between items-start">
+        <div className="space-y-1">
+          <h2 className="text-4xl font-black tracking-tight dark:text-white">
+            {t('welcome', 'Hello')}, {user?.name.split(' ')[0]}
+            {isTranslatingUI && <span className="ml-2 w-2 h-2 inline-block bg-indigo-500 rounded-full animate-ping" />}
+          </h2>
+          <p className="text-gray-400 font-bold text-[11px] uppercase tracking-[0.2em]">{t('ready_assist', 'Ready to Assist')}</p>
+        </div>
       </header>
+
+      {/* Voice Selection Chip (Replacing Location Chip) */}
+      <SlideUp delay="50ms">
+        <button 
+          onClick={() => setModalType('voice_settings')}
+          className="w-full glass dark:bg-slate-900/60 p-4 px-6 rounded-[2rem] border border-gray-100 dark:border-slate-800 shadow-xl flex items-center justify-between group overflow-hidden relative bento-card text-left"
+        >
+          <div className="flex items-center space-x-4 z-10">
+            <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg">
+              🔊
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[9px] font-black text-indigo-500 uppercase tracking-widest leading-none mb-1">{t('voice_label', 'VOICE SETTINGS')}</span>
+              <span className="text-sm font-black text-gray-800 dark:text-white tracking-tight truncate max-w-[200px]">
+                {currentVoiceName}
+              </span>
+            </div>
+          </div>
+          <div className="w-10 h-10 bg-gray-100 dark:bg-slate-800 rounded-xl flex items-center justify-center text-gray-400 group-hover:text-indigo-500 transition-all z-10">
+            ⚙️
+          </div>
+          <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full -mr-16 -mt-16 pointer-events-none" />
+        </button>
+      </SlideUp>
 
       {/* Bento Grid Layout */}
       <section className="grid grid-cols-2 gap-4">
@@ -743,6 +800,53 @@ const App: React.FC = () => {
             setCustomPhrases([...customPhrases, { id: Date.now().toString(), label: modalInput, icon: '💬', category: 'social' }]);
             setModalType('none');
           }} className="w-full bg-indigo-600 text-white p-6 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl">Save Message</button>
+        </div>
+      </Modal>
+
+      <Modal isOpen={modalType === 'voice_settings'} onClose={() => setModalType('none')} title={t('voice_settings', 'Voice Settings')}>
+        <div className="space-y-4">
+          <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-4">{t('select_voice', 'Select Voice Personality')}</p>
+          <div className="space-y-2">
+            {languageVoices.length === 0 ? (
+              <p className="text-slate-400 font-bold text-sm italic py-4">No specific voices found for this language. Using system default.</p>
+            ) : (
+              languageVoices.map((voice) => (
+                <button
+                  key={voice.voiceURI}
+                  onClick={() => {
+                    setSelectedVoiceURI(voice.voiceURI);
+                    speak("Test Voice Activated");
+                  }}
+                  className={`w-full p-4 rounded-2xl flex items-center justify-between border-2 transition-all ${
+                    selectedVoiceURI === voice.voiceURI
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg'
+                      : 'bg-gray-50 dark:bg-slate-800 text-gray-700 dark:text-slate-200 border-transparent hover:border-indigo-300'
+                  }`}
+                >
+                  <div className="flex flex-col items-start">
+                    <span className="font-black text-sm">{voice.name}</span>
+                    <span className={`text-[9px] uppercase tracking-widest ${selectedVoiceURI === voice.voiceURI ? 'text-indigo-100' : 'text-slate-400'}`}>{voice.lang}</span>
+                  </div>
+                  {selectedVoiceURI === voice.voiceURI && <span>✓</span>}
+                </button>
+              ))
+            )}
+            <button
+              onClick={() => {
+                setSelectedVoiceURI('');
+                speak("Default Voice Selected");
+              }}
+              className={`w-full p-4 rounded-2xl flex items-center justify-between border-2 transition-all mt-4 ${
+                selectedVoiceURI === ''
+                  ? 'bg-slate-600 text-white border-slate-600 shadow-lg'
+                  : 'bg-gray-50 dark:bg-slate-800 text-gray-700 dark:text-slate-200 border-transparent hover:border-slate-300'
+              }`}
+            >
+              <span className="font-black text-sm">System Default</span>
+              {selectedVoiceURI === '' && <span>✓</span>}
+            </button>
+          </div>
+          <button onClick={() => setModalType('none')} className="w-full bg-indigo-600 text-white p-6 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl mt-6">{t('done', 'Done')}</button>
         </div>
       </Modal>
     </div>

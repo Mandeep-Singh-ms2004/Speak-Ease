@@ -37,6 +37,23 @@ export const getLanguageFromLocation = async (lat: number, lng: number): Promise
 };
 
 /**
+ * Reverse geocodes coordinates into a user-friendly address string using Gemini.
+ */
+export const reverseGeocode = async (lat: number, lng: number, targetLang: string): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `The user is at coordinates ${lat}, ${lng}. Using your knowledge, describe this approximate location (Neighborhood, City, State) in ${targetLang}. 
+      Be concise (max 8 words). Respond ONLY with the location description.`
+    });
+    return response.text?.trim() || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  } catch (e) {
+    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  }
+};
+
+/**
  * Translates text from any language into the target language.
  */
 export const translateText = async (text: string, targetLang: string): Promise<string> => {

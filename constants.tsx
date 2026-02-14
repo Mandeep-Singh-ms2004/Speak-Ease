@@ -52,7 +52,10 @@ export const UI_TRANSLATIONS: Record<string, Record<string, string>> = {
     stop: 'STOP',
     alert_sent: 'ALERT SENT',
     finding_places: 'Locating essential services...',
-    my_location: 'My Current Location',
+    voice_settings: 'Voice Settings',
+    select_voice: 'Select Voice Personality',
+    current_voice: 'CURRENT VOICE',
+    voice_label: 'VOICE SETTINGS',
   },
   'hi-IN': {
     welcome: 'नमस्ते',
@@ -76,7 +79,10 @@ export const UI_TRANSLATIONS: Record<string, Record<string, string>> = {
     stop: 'रुकें',
     alert_sent: 'अलर्ट भेजा गया',
     finding_places: 'जरूरी सेवाओं का पता लगाया जा रहा है...',
-    my_location: 'मेरा वर्तमान स्थान',
+    voice_settings: 'आवाज़ सेटिंग्स',
+    select_voice: 'आवाज़ चुनें',
+    current_voice: 'वर्तमान आवाज़',
+    voice_label: 'आवाज़ सेटिंग्स',
   },
   'es-ES': {
     welcome: 'Hola',
@@ -100,7 +106,10 @@ export const UI_TRANSLATIONS: Record<string, Record<string, string>> = {
     stop: 'PARAR',
     alert_sent: 'ALERTA ENVIADA',
     finding_places: 'Localizando servicios esenciales...',
-    my_location: 'Mi ubicación actual',
+    voice_settings: 'Ajustes de Voz',
+    select_voice: 'Seleccionar Voz',
+    current_voice: 'VOZ ACTUAL',
+    voice_label: 'AJUSTES DE VOZ',
   }
 };
 
