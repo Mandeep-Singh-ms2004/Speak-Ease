@@ -6,50 +6,15 @@ import { GoogleGenAI, Type } from "@google/genai";
  */
 export const detectLanguage = async (text: string): Promise<string> => {
   if (!text) return "en-US";
-  // Create a new GoogleGenAI instance right before making an API call to ensure it always uses the most up-to-date API key
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: `Analyze this text and identify the IANA language code (e.g., 'hi-IN', 'fr-FR', 'ja-JP'). Respond with ONLY the code: "${text}"`
     });
-    // The response.text property directly returns the string output
     return response.text?.trim() || "en-US";
   } catch (e) {
     return "en-US";
-  }
-};
-
-/**
- * Infers the primary language code based on geographic coordinates.
- */
-export const getLanguageFromLocation = async (lat: number, lng: number): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `The user is at coordinates ${lat}, ${lng}. What is the most likely primary spoken language IANA code for this specific region? Respond with ONLY the IANA code (e.g., 'mr-IN' for Maharashtra, 'es-ES' for Spain).`
-    });
-    return response.text?.trim() || "en-US";
-  } catch (e) {
-    return "en-US";
-  }
-};
-
-/**
- * Reverse geocodes coordinates into a user-friendly address string using Gemini.
- */
-export const reverseGeocode = async (lat: number, lng: number, targetLang: string): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `The user is at coordinates ${lat}, ${lng}. Using your knowledge, describe this approximate location (Neighborhood, City, State) in ${targetLang}. 
-      Be concise (max 8 words). Respond ONLY with the location description.`
-    });
-    return response.text?.trim() || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-  } catch (e) {
-    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
   }
 };
 
@@ -97,7 +62,6 @@ export const getNearbyPlaces = async (lat: number, lng: number, targetLang: stri
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   try {
     const response = await ai.models.generateContent({
-      // Maps grounding is supported in Gemini 2.5 series models
       model: "gemini-2.5-flash",
       contents: `Identify the nearest Hospital, Police Station, and Pharmacy near coordinates ${lat}, ${lng}. 
       Explain their names and distance in ${targetLang}. Provide a short helpful summary for someone who cannot hear or speak.`,
@@ -113,7 +77,6 @@ export const getNearbyPlaces = async (lat: number, lng: number, targetLang: stri
 
     const text = response.text || "No essential services found nearby.";
     const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-    // Extract website/maps URLs from grounding chunks as required for grounding tools
     const links = chunks.map((chunk: any) => chunk.maps).filter(Boolean);
 
     return { text, links };
@@ -139,7 +102,8 @@ export const fetchUITranslations = async (targetLang: string, keys: string[], va
           type: Type.OBJECT,
           properties: keys.reduce((acc, key) => ({ ...acc, [key]: { type: Type.STRING } }), {}),
           required: keys
-        }
+        },
+        temperature: 0.1 // Lower temperature for faster, more consistent output
       }
     });
     return JSON.parse(response.text || "{}");
@@ -157,8 +121,7 @@ export const findLanguageDetails = async (langName: string): Promise<{ code: str
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: `Find the IANA language code and native name for the language: "${langName}". 
-      Example for "French": {"code": "fr-FR", "name": "French", "nativeName": "Français"}`,
+      contents: `Find the IANA language code and native name for the language: "${langName}".`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -195,7 +158,6 @@ export const interpretSignLanguage = async (imageBlob: Blob, targetLangName: str
     const base64Data = await base64Promise;
 
     const response = await ai.models.generateContent({
-      // Use Gemini 3 Pro for complex visual interpretation tasks
       model: 'gemini-3-pro-preview',
       contents: {
         parts: [
@@ -204,7 +166,6 @@ export const interpretSignLanguage = async (imageBlob: Blob, targetLangName: str
         ]
       },
       config: {
-        // High thinking budget for complex multimodal reasoning
         thinkingConfig: { thinkingBudget: 16000 },
         temperature: 0.1,
         systemInstruction: `You are an expert Sign Language interpreter. Be concise and accurate.`

@@ -1,8 +1,8 @@
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useTransition } from 'react';
 import { AppLanguage, User, QuickPhrase } from './types';
 import { QUICK_PHRASES, APP_MODES, TOP_LANGUAGES, SUPPORTED_LANGUAGES, AppMode, UI_TRANSLATIONS } from './constants';
-import { interpretSignLanguage, translateText, getLanguageFromLocation, fetchUITranslations, findLanguageDetails, transliterateText, getNearbyPlaces, reverseGeocode } from './services/geminiService';
+import { interpretSignLanguage, translateText, fetchUITranslations, findLanguageDetails, transliterateText, getNearbyPlaces } from './services/geminiService';
 
 type Theme = 'light' | 'dark' | 'system';
 type AuthStep = 'select' | 'phone' | 'otp';
@@ -140,6 +140,8 @@ const Header: React.FC<{
 );
 
 const App: React.FC = () => {
+  const [isPending, startTransition] = useTransition();
+
   // --- Core States ---
   const [user, setUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('speakease-user');
@@ -148,7 +150,11 @@ const App: React.FC = () => {
 
   const [lang, setLang] = useState<AppLanguage>(TOP_LANGUAGES[0]); 
   const [availableLanguages, setAvailableLanguages] = useState<AppLanguage[]>(SUPPORTED_LANGUAGES);
-  const [dynamicTranslations, setDynamicTranslations] = useState<Record<string, string>>({});
+  const [dynamicTranslations, setDynamicTranslations] = useState<Record<string, string>>(() => {
+    const saved = localStorage.getItem('speakease-translation-cache');
+    return saved ? JSON.parse(saved) : {};
+  });
+  
   const [isTranslatingUI, setIsTranslatingUI] = useState(false);
   const [currentMode, setCurrentMode] = useState<'home' | 'talk_listen' | 'sign' | 'nearby'>('home');
   const [inputText, setInputText] = useState('');
@@ -182,51 +188,71 @@ const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const liveScanTimerRef = useRef<any>(null);
 
-  // --- Translation Logic ---
+  // --- Translation Logic with Latency Optimization ---
   const t = useMemo(() => (key: string, fallback: string) => {
-    if (dynamicTranslations[key]) return dynamicTranslations[key];
+    // 1. Check Hardcoded
     const hardcoded = UI_TRANSLATIONS[lang.code]?.[key];
     if (hardcoded) return hardcoded;
-    const english = UI_TRANSLATIONS['en-US']?.[key];
-    return english || fallback;
+
+    // 2. Check Dynamic Cache
+    const cacheKey = `${lang.code}_${key}`;
+    if (dynamicTranslations[cacheKey]) return dynamicTranslations[cacheKey];
+
+    // 3. Fallback to English
+    return UI_TRANSLATIONS['en-US']?.[key] || fallback;
   }, [lang, dynamicTranslations]);
 
   useEffect(() => {
     const fetchDynamic = async () => {
-      if (UI_TRANSLATIONS[lang.code]) {
-        setDynamicTranslations({});
-        return;
-      }
+      // Skip if hardcoded
+      if (UI_TRANSLATIONS[lang.code]) return;
+
+      // Check if already in dynamic cache (full set)
+      const firstKey = Object.keys(UI_TRANSLATIONS['en-US'])[0];
+      if (dynamicTranslations[`${lang.code}_${firstKey}`]) return;
+
       setIsTranslatingUI(true);
       const baseStrings = UI_TRANSLATIONS['en-US'];
       const keys = Object.keys(baseStrings);
       const values = Object.values(baseStrings);
+      
       try {
         const translations = await fetchUITranslations(lang.name, keys, values);
-        setDynamicTranslations(translations);
-      } catch (err) { console.error(err); } 
-      finally { setIsTranslatingUI(false); }
+        const newCache = { ...dynamicTranslations };
+        Object.entries(translations).forEach(([key, val]) => {
+          newCache[`${lang.code}_${key}`] = val;
+        });
+        
+        setDynamicTranslations(newCache);
+        localStorage.setItem('speakease-translation-cache', JSON.stringify(newCache));
+      } catch (err) { 
+        console.error("Latency optimized translation failed:", err); 
+      } finally { 
+        setIsTranslatingUI(false); 
+      }
     };
     fetchDynamic();
   }, [lang]);
 
-  // Handle available voices
+  // Handle available voices with pre-warming
   useEffect(() => {
     const updateVoices = () => {
       const voices = window.speechSynthesis.getVoices();
       setAvailableVoices(voices);
     };
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
     updateVoices();
-    window.speechSynthesis.onvoiceschanged = updateVoices;
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
-  // Filter voices for current language
+  // Filter voices for current language (Memoized)
   const languageVoices = useMemo(() => {
     return availableVoices.filter(v => v.lang.startsWith(lang.code.split('-')[0]));
   }, [availableVoices, lang]);
 
-  // Current voice display name
+  // Current voice display name (Memoized)
   const currentVoiceName = useMemo(() => {
     const voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
     return voice ? voice.name : 'System Default';
@@ -300,7 +326,7 @@ const App: React.FC = () => {
     setTimeout(() => {
       setUser({ id: 'google-' + Date.now(), name: 'Alex Johnson', photoURL: 'https://i.pravatar.cc/150?u=alex', authMethod: 'google' });
       setIsAuthLoading(false);
-    }, 1500);
+    }, 500); // Faster login feel
   };
 
   const loginAsGuest = () => {
@@ -308,7 +334,7 @@ const App: React.FC = () => {
     setTimeout(() => {
       setUser({ id: 'guest-' + Date.now(), name: 'Guest User', authMethod: 'guest' });
       setIsAuthLoading(false);
-    }, 800);
+    }, 400); // Faster login feel
   };
 
   const logout = () => {
@@ -319,20 +345,23 @@ const App: React.FC = () => {
 
   const speak = async (text: string) => {
     if (!text) return;
+    
+    // Low latency TTS trigger
     window.speechSynthesis.cancel();
+    
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = lang.code;
     utterance.rate = 1.0;
     
-    // Select preferred voice
+    // Select preferred voice from cache
     let voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
     if (!voice) {
-      // Fallback to language default
       voice = availableVoices.find(v => v.lang.startsWith(lang.code.split('-')[0])) || availableVoices[0];
     }
     
     if (voice) utterance.voice = voice;
     window.speechSynthesis.speak(utterance);
+    
     if ("vibrate" in navigator) navigator.vibrate(50);
   };
 
@@ -347,7 +376,7 @@ const App: React.FC = () => {
           const suggested = await transliterateText(lastWord, lang.name);
           if (suggested !== lastWord) setKeyboardSuggestions([suggested]);
           else setKeyboardSuggestions([]);
-        }, 600);
+        }, 300); // Faster debounce
       } else setKeyboardSuggestions([]);
     }
   };
@@ -438,7 +467,6 @@ const App: React.FC = () => {
             <button onClick={() => setAuthStep('phone')} className="w-full bg-slate-900 text-white border border-slate-800 p-6 rounded-[2.5rem] font-black text-lg flex items-center justify-center space-x-4 active:scale-95 transition-all bento-card">
               <span>📱 Phone Login</span>
             </button>
-            {/* Fixed the invalid 'loginAsGuest' attribute from the button element */}
             <button className="w-full text-slate-600 p-4 font-black text-xs uppercase tracking-[0.3em] hover:text-white transition-colors" onClick={loginAsGuest}>
               Continue as Guest
             </button>
@@ -461,7 +489,7 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Voice Selection Chip (Replacing Location Chip) */}
+      {/* Voice Selection Chip */}
       <SlideUp delay="50ms">
         <button 
           onClick={() => setModalType('voice_settings')}
@@ -744,11 +772,17 @@ const App: React.FC = () => {
     if ("vibrate" in navigator) navigator.vibrate(30);
   };
 
+  const handleLangChange = (l: AppLanguage) => {
+    startTransition(() => {
+      setLang(l);
+    });
+  };
+
   return (
     <div className="max-w-md mx-auto h-screen bg-white dark:bg-slate-950 flex flex-col antialiased relative shadow-[0_0_100px_rgba(0,0,0,0.1)]">
       <div className="sticky top-0 z-50">
         {user && <Header currentLang={lang} user={user} onLogout={logout} theme={theme} onThemeChange={setTheme} t={t} />}
-        <LanguageSelector currentLang={lang} allLanguages={availableLanguages} onLangChange={setLang} onAddLang={() => { setModalType('add_lang'); setModalInput(''); }} />
+        <LanguageSelector currentLang={lang} allLanguages={availableLanguages} onLangChange={handleLangChange} onAddLang={() => { setModalType('add_lang'); setModalInput(''); }} />
       </div>
 
       <main className="flex-1 overflow-y-auto custom-scrollbar">
