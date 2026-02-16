@@ -1,886 +1,724 @@
 
-import React, { useState, useEffect, useRef, useMemo, useTransition } from 'react';
-import { AppLanguage, User, QuickPhrase } from './types';
-import { QUICK_PHRASES, APP_MODES, TOP_LANGUAGES, SUPPORTED_LANGUAGES, AppMode, UI_TRANSLATIONS } from './constants';
-import { interpretSignLanguage, translateText, fetchUITranslations, findLanguageDetails, transliterateText, getNearbyPlaces } from './services/geminiService';
+import React, { useState, useEffect, useRef, useMemo, Component, ErrorInfo, ReactNode } from 'react';
+import { GoogleGenAI } from "@google/genai";
+import { AppLanguage, User, QuickPhrase, EmergencyContact } from './types';
+import { QUICK_PHRASES, TOP_LANGUAGES, SUPPORTED_LANGUAGES, UI_TRANSLATIONS } from './constants';
+import { interpretSignLanguage, translateText, findLanguageDetails, getNearbyPlaces } from './services/geminiService';
 
-type Theme = 'light' | 'dark' | 'system';
-type AuthStep = 'select' | 'phone' | 'otp';
+type Mode = 'home' | 'talk_listen' | 'sign' | 'sos' | 'nearby' | 'settings';
 
-// --- Reusable Animated Layout Component ---
+// --- Error Boundary ---
+interface BoundaryProps { children: ReactNode; fallback: ReactNode; }
+interface BoundaryState { hasError: boolean; }
+class StandardErrorBoundary extends Component<BoundaryProps, BoundaryState> {
+  public state: BoundaryState = { hasError: false };
+  public static getDerivedStateFromError(_: Error): BoundaryState { return { hasError: true }; }
+  public componentDidCatch(error: Error, errorInfo: ErrorInfo) { console.error("App error:", error, errorInfo); }
+  public render() {
+    if (this.state.hasError) return this.props.fallback;
+    return this.props.children;
+  }
+}
+
+// --- Animation & UI Wrappers ---
 const FadeIn: React.FC<{ children: React.ReactNode, delay?: string }> = ({ children, delay = '0ms' }) => (
-  <div className="animate-fade-in" style={{ animationDelay: delay }}>
-    {children}
-  </div>
+  <div className="animate-fade-in" style={{ opacity: 0, animation: `fade-in 0.3s ease-in forwards`, animationDelay: delay }}>{children}</div>
 );
 
 const SlideUp: React.FC<{ children: React.ReactNode, delay?: string }> = ({ children, delay = '0ms' }) => (
-  <div className="animate-slide-up" style={{ animationDelay: delay }}>
-    {children}
+  <div className="animate-slide-up" style={{ transform: 'translateY(20px)', opacity: 0, animation: `slide-up 0.5s ease-out forwards`, animationDelay: delay }}>{children}</div>
+);
+
+const Waveform: React.FC<{ color?: string, active?: boolean }> = ({ color = 'bg-indigo-500', active = true }) => (
+  <div className="flex items-end justify-center gap-1 h-8 px-2">
+    {[...Array(8)].map((_, i) => (
+      <div 
+        key={i} 
+        className={`w-1 rounded-full ${color} ${active ? 'sound-bar' : ''}`} 
+        style={{ 
+          animationDelay: `${i * 0.1}s`, 
+          height: active ? `${Math.random() * 20 + 8}px` : '4px',
+          transition: 'height 0.3s ease'
+        }}
+      />
+    ))}
   </div>
 );
 
-// --- Custom Modal Component ---
-const Modal: React.FC<{
-  isOpen: boolean;
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-}> = ({ isOpen, onClose, title, children }) => {
+const Modal: React.FC<{ isOpen: boolean, onClose: () => void, title: string, children: React.ReactNode, border?: string }> = ({ isOpen, onClose, title, children, border = 'border-white/10' }) => {
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in">
-      <div className="bg-white dark:bg-slate-900 w-full max-w-sm rounded-[3rem] overflow-hidden shadow-2xl border border-white/20 animate-slide-up p-8 space-y-6">
+    <div className="fixed inset-0 z-[100] bg-slate-950/80 backdrop-blur-md flex items-end sm:items-center justify-center p-4">
+      <div className={`bg-slate-900 w-full max-w-lg rounded-[3rem] p-8 border ${border} shadow-2xl space-y-8 animate-slide-up`}>
         <div className="flex justify-between items-center">
-          <h3 className="text-2xl font-black text-gray-900 dark:text-white tracking-tighter">{title}</h3>
-          <button onClick={onClose} className="w-10 h-10 flex items-center justify-center bg-gray-100 dark:bg-slate-800 rounded-full text-gray-500">✕</button>
+          <h3 className="text-3xl font-black tracking-tighter">{title}</h3>
+          <button onClick={onClose} className="w-12 h-12 glass rounded-full flex items-center justify-center text-xl">✕</button>
         </div>
-        <div className="w-full h-full max-h-[60vh] overflow-y-auto custom-scrollbar">{children}</div>
+        <div className="max-h-[60vh] overflow-y-auto no-scrollbar">{children}</div>
       </div>
     </div>
   );
 };
-
-// --- Theme Switcher ---
-const ThemeSwitcher: React.FC<{ theme: Theme, onThemeChange: (t: Theme) => void }> = ({ theme, onThemeChange }) => {
-  const themes: { id: Theme, icon: string, label: string }[] = [
-    { id: 'light', icon: '☀️', label: 'Light' },
-    { id: 'dark', icon: '🌙', label: 'Dark' },
-    { id: 'system', icon: '🌓', label: 'Auto' },
-  ];
-
-  return (
-    <div className="flex bg-gray-100/50 dark:bg-slate-800/50 p-1.5 rounded-2xl border border-gray-200/50 dark:border-slate-700/50">
-      {themes.map((t) => (
-        <button
-          key={t.id}
-          onClick={() => onThemeChange(t.id)}
-          className={`flex items-center justify-center w-9 h-9 rounded-xl transition-all duration-300 ${
-            theme === t.id 
-              ? 'bg-white dark:bg-slate-600 shadow-xl scale-110 ring-2 ring-indigo-500/20' 
-              : 'opacity-40 hover:opacity-100'
-          }`}
-        >
-          <span className="text-lg">{t.icon}</span>
-        </button>
-      ))}
-    </div>
-  );
-};
-
-const LanguageSelector: React.FC<{
-  currentLang: AppLanguage,
-  allLanguages: AppLanguage[],
-  onLangChange: (l: AppLanguage) => void,
-  onAddLang: () => void
-}> = ({ currentLang, allLanguages, onLangChange, onAddLang }) => {
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const activeBtn = scrollRef.current?.querySelector(`[data-lang="${currentLang.code}"]`);
-    if (activeBtn) {
-      activeBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-    }
-  }, [currentLang, allLanguages]);
-
-  return (
-    <div className="glass border-b border-gray-100/50 dark:border-slate-800/50 flex items-center shrink-0">
-      <div 
-        ref={scrollRef}
-        className="flex-1 flex overflow-x-auto py-4 px-4 space-x-3 no-scrollbar scroll-smooth"
-      >
-        {allLanguages.map((l) => (
-          <button
-            key={l.code}
-            data-lang={l.code}
-            onClick={() => onLangChange(l)}
-            className={`flex-shrink-0 px-6 py-2.5 rounded-2xl text-[11px] font-extrabold transition-all border-2 ${
-              currentLang.code === l.code
-                ? 'bg-indigo-600 text-white border-indigo-600 shadow-xl scale-105'
-                : 'bg-white dark:bg-slate-800/50 text-gray-500 dark:text-slate-400 border-gray-100 dark:border-slate-800 hover:border-indigo-200'
-            }`}
-          >
-            {l.nativeName}
-          </button>
-        ))}
-      </div>
-      <button 
-        onClick={onAddLang}
-        className="px-6 py-4 text-indigo-600 dark:text-indigo-400 font-black text-2xl hover:scale-125 transition-transform"
-      >
-        ＋
-      </button>
-    </div>
-  );
-};
-
-const Header: React.FC<{ 
-  currentLang: AppLanguage, 
-  user: User | null,
-  onLogout: () => void,
-  theme: Theme,
-  onThemeChange: (t: Theme) => void,
-  t: (k: string, f: string) => string
-}> = ({ currentLang, user, onLogout, theme, onThemeChange, t }) => (
-  <header className="glass px-6 py-4 flex items-center justify-between border-b border-gray-100/50 dark:border-slate-800/50 shrink-0">
-    <div className="flex items-center space-x-4">
-      <button onClick={onLogout} className="relative group active:scale-90 transition-transform">
-        <div className="w-12 h-12 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-white font-black text-lg shadow-xl overflow-hidden">
-          {user?.photoURL ? <img src={user.photoURL} alt="" className="w-full h-full object-cover" /> : user?.name.charAt(0).toUpperCase() || 'U'}
-        </div>
-        <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 border-2 border-white dark:border-slate-900 rounded-full" />
-      </button>
-      <div className="flex flex-col">
-        <h1 className="text-xl font-black text-gray-900 dark:text-white tracking-tight">SpeakEase</h1>
-        <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest leading-none mt-0.5">{currentLang.name}</span>
-      </div>
-    </div>
-    <ThemeSwitcher theme={theme} onThemeChange={onThemeChange} />
-  </header>
-);
 
 const App: React.FC = () => {
-  const [isPending, startTransition] = useTransition();
-
-  // --- Core States ---
+  // --- States ---
   const [user, setUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('speakease-user');
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = localStorage.getItem('speakease-user');
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
   });
-
-  const [lang, setLang] = useState<AppLanguage>(TOP_LANGUAGES[0]); 
-  const [availableLanguages, setAvailableLanguages] = useState<AppLanguage[]>(SUPPORTED_LANGUAGES);
-  const [dynamicTranslations, setDynamicTranslations] = useState<Record<string, string>>(() => {
-    const saved = localStorage.getItem('speakease-translation-cache');
-    return saved ? JSON.parse(saved) : {};
-  });
+  const [lang, setLang] = useState<AppLanguage>(TOP_LANGUAGES[0]);
+  const [currentMode, setCurrentMode] = useState<Mode>('home');
+  const [showTutorial, setShowTutorial] = useState(() => !localStorage.getItem('speakease-onboarded'));
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   
-  const [isTranslatingUI, setIsTranslatingUI] = useState(false);
-  const [currentMode, setCurrentMode] = useState<'home' | 'talk_listen' | 'sign' | 'nearby'>('home');
+  // UI Interactions
   const [inputText, setInputText] = useState('');
-  const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   const [isSignLoading, setIsSignLoading] = useState(false);
   const [isLiveScanning, setIsLiveScanning] = useState(false);
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('speakease-theme') as Theme) || 'system');
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>(() => localStorage.getItem('speakease-voice-uri') || '');
-  const [customPhrases, setCustomPhrases] = useState<QuickPhrase[]>(() => {
-    const saved = localStorage.getItem('speakease-custom-phrases');
-    return saved ? JSON.parse(saved) : QUICK_PHRASES;
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [confidence, setConfidence] = useState(0);
+  const [recentPhrases, setRecentPhrases] = useState<string[]>([]);
+  const [activeFilter, setActiveFilter] = useState<'hospital' | 'police' | 'pharmacy'>('hospital');
+  const [signHistory, setSignHistory] = useState<string[]>([]);
+  
+  // Nearby Results
+  const [nearbyResults, setNearbyResults] = useState<Record<string, { text: string, links: any[] }>>({
+    hospital: { text: '', links: [] },
+    police: { text: '', links: [] },
+    pharmacy: { text: '', links: [] }
   });
-  const [isManagingPhrases, setIsManagingPhrases] = useState(false);
-
-  // --- Feature States ---
-  const [authStep, setAuthStep] = useState<AuthStep>('select');
-  const [isAuthLoading, setIsAuthLoading] = useState(false);
-  const [isPhoneticEnabled, setIsPhoneticEnabled] = useState(false);
-  const [keyboardSuggestions, setKeyboardSuggestions] = useState<string[]>([]);
-  const [nearbyResults, setNearbyResults] = useState<{ text: string, links: any[] } | null>(null);
   const [isNearbyLoading, setIsNearbyLoading] = useState(false);
   const [currentCoords, setCurrentCoords] = useState<{ lat: number, lng: number } | null>(null);
-  const [modalType, setModalType] = useState<'add_lang' | 'add_phrase' | 'voice_settings' | 'none'>('none');
-  const [modalInput, setModalInput] = useState('');
   
-  const transliterateDebounceRef = useRef<any>(null);
+  // SOS States
+  const [show911Confirmation, setShow911Confirmation] = useState(false);
+  const [emergencyType, setEmergencyType] = useState<'call' | 'text' | null>(null);
+  const [sosCountdown, setSosCountdown] = useState<number | null>(null);
+  
+  // Settings
+  const [voiceSpeed, setVoiceSpeed] = useState(1);
+  const [hapticsEnabled, setHapticsEnabled] = useState(true);
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState(localStorage.getItem('speakease-voice-uri') || '');
+  const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>(() => {
+    return user?.emergencyContacts || [{ name: 'Family Alert', phone: '911' }];
+  });
+
+  // Global Modals
+  const [modalType, setModalType] = useState<'none' | 'add_lang' | 'voice_settings' | 'add_contact'>('none');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
+  // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const liveScanTimerRef = useRef<any>(null);
+  const sosTimerRef = useRef<any>(null);
 
-  // --- Translation Logic with Latency Optimization ---
-  const t = useMemo(() => (key: string, fallback: string) => {
-    // 1. Check Hardcoded
-    const hardcoded = UI_TRANSLATIONS[lang.code]?.[key];
-    if (hardcoded) return hardcoded;
+  // --- Derived ---
+  const currentVoiceName = availableVoices.find(v => v.voiceURI === selectedVoiceURI)?.name || 'System Default';
+  const availableLanguages = SUPPORTED_LANGUAGES;
 
-    // 2. Check Dynamic Cache
-    const cacheKey = `${lang.code}_${key}`;
-    if (dynamicTranslations[cacheKey]) return dynamicTranslations[cacheKey];
-
-    // 3. Fallback to English
-    return UI_TRANSLATIONS['en-US']?.[key] || fallback;
-  }, [lang, dynamicTranslations]);
-
+  // --- Effects ---
   useEffect(() => {
-    const fetchDynamic = async () => {
-      // Skip if hardcoded
-      if (UI_TRANSLATIONS[lang.code]) return;
-
-      // Check if already in dynamic cache (full set)
-      const firstKey = Object.keys(UI_TRANSLATIONS['en-US'])[0];
-      if (dynamicTranslations[`${lang.code}_${firstKey}`]) return;
-
-      setIsTranslatingUI(true);
-      const baseStrings = UI_TRANSLATIONS['en-US'];
-      const keys = Object.keys(baseStrings);
-      const values = Object.values(baseStrings);
-      
-      try {
-        const translations = await fetchUITranslations(lang.name, keys, values);
-        const newCache = { ...dynamicTranslations };
-        Object.entries(translations).forEach(([key, val]) => {
-          newCache[`${lang.code}_${key}`] = val;
-        });
-        
-        setDynamicTranslations(newCache);
-        localStorage.setItem('speakease-translation-cache', JSON.stringify(newCache));
-      } catch (err) { 
-        console.error("Latency optimized translation failed:", err); 
-      } finally { 
-        setIsTranslatingUI(false); 
-      }
-    };
-    fetchDynamic();
-  }, [lang]);
-
-  // Handle available voices with pre-warming
-  useEffect(() => {
-    const updateVoices = () => {
-      const voices = window.speechSynthesis.getVoices();
-      setAvailableVoices(voices);
-    };
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = updateVoices;
-    }
+    const updateVoices = () => setAvailableVoices(window.speechSynthesis.getVoices());
+    window.speechSynthesis.onvoiceschanged = updateVoices;
     updateVoices();
-    return () => { window.speechSynthesis.onvoiceschanged = null; };
+    
+    const updateOnline = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', updateOnline);
+    window.addEventListener('offline', updateOnline);
+
+    return () => {
+      window.removeEventListener('online', updateOnline);
+      window.removeEventListener('offline', updateOnline);
+    };
   }, []);
 
-  // Filter voices for current language (Memoized)
-  const languageVoices = useMemo(() => {
-    return availableVoices.filter(v => v.lang.startsWith(lang.code.split('-')[0]));
-  }, [availableVoices, lang]);
-
-  // Current voice display name (Memoized)
-  const currentVoiceName = useMemo(() => {
-    const voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
-    return voice ? voice.name : 'System Default';
-  }, [availableVoices, selectedVoiceURI]);
-
-  // --- Side Effects ---
   useEffect(() => {
-    localStorage.setItem('speakease-custom-phrases', JSON.stringify(customPhrases));
-  }, [customPhrases]);
-
-  useEffect(() => {
-    if (user) localStorage.setItem('speakease-user', JSON.stringify(user));
-    else localStorage.removeItem('speakease-user');
-  }, [user]);
-
-  useEffect(() => {
-    const root = window.document.documentElement;
-    const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    if (isDark) root.classList.add('dark'); else root.classList.remove('dark');
-    localStorage.setItem('speakease-theme', theme);
-  }, [theme]);
-
-  useEffect(() => {
-    if (selectedVoiceURI) localStorage.setItem('speakease-voice-uri', selectedVoiceURI);
-  }, [selectedVoiceURI]);
-
-  // Reset inputs when switching modes
-  useEffect(() => {
-    setTranscript('');
-    setInputText('');
-    setKeyboardSuggestions([]);
-    setIsListening(false);
-    setIsLiveScanning(false);
+    if (currentMode === 'nearby' || currentMode === 'sos') {
+      fetchLocation();
+    }
   }, [currentMode]);
 
-  // Handle camera for Sign Language mode
   useEffect(() => {
-    let stream: MediaStream | null = null;
-    if (currentMode === 'sign' && videoRef.current) {
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
-        .then(s => {
-          stream = s;
-          if (videoRef.current) videoRef.current.srcObject = s;
-        })
-        .catch(err => console.error("Camera access denied:", err));
+    if (currentMode === 'nearby' && currentCoords && !nearbyResults[activeFilter].links.length) {
+      performSearch();
     }
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [currentMode]);
+  }, [currentMode, activeFilter, currentCoords]);
 
-  // Handle live scanning interval for sign mode
-  useEffect(() => {
-    if (isLiveScanning && currentMode === 'sign') {
-      liveScanTimerRef.current = setInterval(() => {
-        captureAndInterpret();
-      }, 5000); 
-    } else {
-      if (liveScanTimerRef.current) clearInterval(liveScanTimerRef.current);
+  const fetchLocation = () => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setCurrentCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => console.error("Location access denied.")
+    );
+  };
+
+  const performSearch = async () => {
+    if (!currentCoords) return;
+    setIsNearbyLoading(true);
+    try {
+      const results = await getNearbyPlaces(currentCoords.lat, currentCoords.lng, lang.name);
+      setNearbyResults(prev => ({ ...prev, [activeFilter]: results }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsNearbyLoading(false);
     }
-    return () => {
-      if (liveScanTimerRef.current) clearInterval(liveScanTimerRef.current);
-    };
-  }, [isLiveScanning, currentMode]);
+  };
 
-  // --- App Actions ---
+  // --- Handlers ---
   const loginWithGoogle = () => {
     setIsAuthLoading(true);
+    // Simulate interactive login
     setTimeout(() => {
-      setUser({ id: 'google-' + Date.now(), name: 'Alex Johnson', photoURL: 'https://i.pravatar.cc/150?u=alex', authMethod: 'google' });
+      const mockUser: User = { 
+        id: 'g-1', 
+        name: 'Alex Rivera', 
+        authMethod: 'google',
+        emergencyContacts: [{ name: 'Emergency Family', phone: '911' }]
+      };
+      setUser(mockUser);
+      localStorage.setItem('speakease-user', JSON.stringify(mockUser));
       setIsAuthLoading(false);
-    }, 500); // Faster login feel
+    }, 1800);
   };
 
   const loginAsGuest = () => {
     setIsAuthLoading(true);
     setTimeout(() => {
-      setUser({ id: 'guest-' + Date.now(), name: 'Guest User', authMethod: 'guest' });
+      const guestUser: User = { id: 'guest-' + Date.now(), name: 'Guest User', authMethod: 'guest' };
+      setUser(guestUser);
+      localStorage.setItem('speakease-user', JSON.stringify(guestUser));
       setIsAuthLoading(false);
-    }, 400); // Faster login feel
+    }, 800);
   };
 
-  const logout = () => {
-    setUser(null);
-    setAuthStep('select');
-    setCurrentMode('home');
-  };
-
-  const speak = async (text: string) => {
+  const speak = async (text: string, phraseId?: string) => {
     if (!text) return;
-    
-    // Low latency TTS trigger
+    if (phraseId) setPlayingId(phraseId);
     window.speechSynthesis.cancel();
-    
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = lang.code;
-    utterance.rate = 1.0;
-    
-    // Select preferred voice from cache
-    let voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
-    if (!voice) {
-      voice = availableVoices.find(v => v.lang.startsWith(lang.code.split('-')[0])) || availableVoices[0];
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.lang = lang.code;
+    utt.rate = voiceSpeed;
+    const voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
+    if (voice) utt.voice = voice;
+    utt.onend = () => setPlayingId(null);
+    window.speechSynthesis.speak(utt);
+    if (!recentPhrases.includes(text)) {
+      setRecentPhrases(prev => [text, ...prev].slice(0, 5));
     }
-    
-    if (voice) utterance.voice = voice;
-    window.speechSynthesis.speak(utterance);
-    
-    if ("vibrate" in navigator) navigator.vibrate(50);
   };
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newVal = e.target.value;
-    setInputText(newVal);
-    if (isPhoneticEnabled) {
-      if (transliterateDebounceRef.current) clearTimeout(transliterateDebounceRef.current);
-      const lastWord = newVal.split(/\s+/).pop();
-      if (lastWord && lastWord.length > 2) {
-        transliterateDebounceRef.current = setTimeout(async () => {
-          const suggested = await transliterateText(lastWord, lang.name);
-          if (suggested !== lastWord) setKeyboardSuggestions([suggested]);
-          else setKeyboardSuggestions([]);
-        }, 300); // Faster debounce
-      } else setKeyboardSuggestions([]);
+  const act911 = (type: 'call' | 'text') => {
+    setEmergencyType(type);
+    setShow911Confirmation(true);
+    if (hapticsEnabled && "vibrate" in navigator) navigator.vibrate(200);
+  };
+
+  const confirmSOS = () => {
+    if (hapticsEnabled && "vibrate" in navigator) navigator.vibrate(300);
+    const href = emergencyType === 'call' ? 'tel:911' : `sms:911?body=Emergency at my location: ${currentCoords?.lat}, ${currentCoords?.lng}`;
+    window.location.href = href;
+    setShow911Confirmation(false);
+  };
+
+  const shareLocationWithContacts = () => {
+    if (!currentCoords) {
+      fetchLocation();
+      alert("Fetching location... please try again in a second.");
+      return;
     }
+    const message = `🆘 EMERGENCY ALERT from SpeakEase\nI need help at Lat: ${currentCoords.lat}, Lng: ${currentCoords.lng}\nMaps: https://maps.google.com/?q=${currentCoords.lat},${currentCoords.lng}`;
+    emergencyContacts.forEach(contact => {
+      window.open(`sms:${contact.phone}?body=${encodeURIComponent(message)}`);
+    });
+    if (hapticsEnabled && "vibrate" in navigator) navigator.vibrate([100, 50, 100]);
   };
 
   const startListening = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US'; 
-    recognition.onstart = () => { setIsListening(true); setTranscript(""); };
-    recognition.onresult = async (event: any) => {
-      const text = event.results[0][0].transcript;
+    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRec) {
+      alert("Speech recognition not supported in this browser.");
+      return;
+    }
+    const rec = new SpeechRec();
+    rec.lang = 'en-US';
+    rec.onstart = () => setIsListening(true);
+    rec.onresult = async (e: any) => {
+      const result = e.results[0][0].transcript;
+      const conf = e.results[0][0].confidence;
       setIsTranslating(true);
-      const translated = await translateText(text, lang.name);
+      const translated = await translateText(result, lang.name);
       setTranscript(translated);
+      setConfidence(conf);
       setIsTranslating(false);
     };
-    recognition.onend = () => setIsListening(false);
-    recognition.start();
+    rec.onend = () => setIsListening(false);
+    rec.start();
   };
 
-  const captureAndInterpret = async () => {
-    if (!videoRef.current || !canvasRef.current || isSignLoading) return;
+  const handleCapture = async () => {
+    if (!videoRef.current || isSignLoading) return;
     setIsSignLoading(true);
-    try {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0);
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            const result = await interpretSignLanguage(blob, lang.name);
-            setTranscript(result);
-          }
-          setIsSignLoading(false);
-        }, 'image/jpeg', 0.8);
-      } else {
-        setIsSignLoading(false);
+    const canvas = canvasRef.current!;
+    const video = videoRef.current!;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d')?.drawImage(video, 0, 0);
+    canvas.toBlob(async (blob) => {
+      if (blob) {
+        const result = await interpretSignLanguage(blob, lang.name);
+        setTranscript(result);
+        setSignHistory(prev => [result, ...prev].slice(0, 5));
       }
-    } catch (error) {
-      console.error("Sign capture error:", error);
       setIsSignLoading(false);
-    }
+    }, 'image/jpeg');
   };
 
-  const fetchNearby = () => {
-    setIsNearbyLoading(true);
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      const { latitude, longitude } = pos.coords;
-      setCurrentCoords({ lat: latitude, lng: longitude });
-      const results = await getNearbyPlaces(latitude, longitude, lang.name);
-      setNearbyResults(results);
-      setIsNearbyLoading(false);
-    }, () => {
-      setNearbyResults({ text: "Please enable location.", links: [] });
-      setIsNearbyLoading(false);
-    });
-  };
+  // --- View Components ---
 
-  // --- Auth Views ---
-  const renderAuth = () => (
-    <div className="flex-1 flex flex-col bg-slate-950 p-10 space-y-12 items-center justify-center overflow-hidden">
-      <SlideUp>
-        <div className="flex flex-col items-center space-y-6">
-          <div className="text-[100px] animate-bounce-gentle">🤟</div>
-          <div className="text-center">
-            <h1 className="text-6xl font-black text-white tracking-tighter">SpeakEase</h1>
-            <p className="text-indigo-400 font-black uppercase tracking-[0.4em] text-[10px] mt-2">Connecting Worlds</p>
-          </div>
-        </div>
-      </SlideUp>
-
-      <div className="w-full max-w-sm space-y-6">
-        {isAuthLoading ? (
-          <div className="flex flex-col items-center space-y-4">
-            <div className="w-16 h-16 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
-            <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">Verifying credentials...</p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <button onClick={loginWithGoogle} className="w-full bg-white text-slate-950 p-6 rounded-[2.5rem] font-black text-lg shadow-2xl flex items-center justify-center space-x-4 active:scale-95 transition-all bento-card">
-              <img src="https://www.google.com/favicon.ico" alt="" className="w-6 h-6" />
-              <span>Google One-Tap</span>
-            </button>
-            <button onClick={() => setAuthStep('phone')} className="w-full bg-slate-900 text-white border border-slate-800 p-6 rounded-[2.5rem] font-black text-lg flex items-center justify-center space-x-4 active:scale-95 transition-all bento-card">
-              <span>📱 Phone Login</span>
-            </button>
-            <button className="w-full text-slate-600 p-4 font-black text-xs uppercase tracking-[0.3em] hover:text-white transition-colors" onClick={loginAsGuest}>
-              Continue as Guest
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  // --- Main Mode Views ---
   const renderHome = () => (
-    <div className="p-6 space-y-6 pb-24 min-h-full">
-      <header className="flex justify-between items-start">
+    <div className="p-6 space-y-10 pb-32 overflow-y-auto custom-scrollbar h-full">
+      <header className="flex justify-between items-center">
         <div className="space-y-1">
-          <h2 className="text-4xl font-black tracking-tight dark:text-white">
-            {t('welcome', 'Hello')}, {user?.name.split(' ')[0]}
-            {isTranslatingUI && <span className="ml-2 w-2 h-2 inline-block bg-indigo-500 rounded-full animate-ping" />}
-          </h2>
-          <p className="text-gray-400 font-bold text-[11px] uppercase tracking-[0.2em]">{t('ready_assist', 'Ready to Assist')}</p>
+          <h2 className="text-4xl font-black tracking-tighter">Hello, {user?.name.split(' ')[0]}</h2>
+          <p className="text-slate-500 font-black text-[10px] uppercase tracking-widest">Accessibility Hub</p>
         </div>
+        <button onClick={() => setCurrentMode('settings')} className="w-12 h-12 glass rounded-2xl flex items-center justify-center text-xl shadow-lg hover:scale-110 transition-transform">⚙️</button>
       </header>
 
-      {/* Voice Selection Chip */}
-      <SlideUp delay="50ms">
-        <button 
-          onClick={() => setModalType('voice_settings')}
-          className="w-full glass dark:bg-slate-900/60 p-4 px-6 rounded-[2rem] border border-gray-100 dark:border-slate-800 shadow-xl flex items-center justify-between group overflow-hidden relative bento-card text-left"
-        >
-          <div className="flex items-center space-x-4 z-10">
-            <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg">
-              🔊
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[9px] font-black text-indigo-500 uppercase tracking-widest leading-none mb-1">{t('voice_label', 'VOICE SETTINGS')}</span>
-              <span className="text-sm font-black text-gray-800 dark:text-white tracking-tight truncate max-w-[200px]">
-                {currentVoiceName}
-              </span>
-            </div>
+      {recentPhrases.length > 0 && (
+        <section className="space-y-3">
+          <h3 className="text-slate-500 font-black text-[10px] uppercase tracking-[0.2em] ml-2">Recent</h3>
+          <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
+            {recentPhrases.map((phrase, i) => (
+              <button key={i} onClick={() => speak(phrase)} className="flex-shrink-0 px-6 py-3 bg-white/5 rounded-full border border-white/5 font-bold text-sm text-indigo-300 hover:bg-indigo-500/10 transition-all">{phrase}</button>
+            ))}
           </div>
-          <div className="w-10 h-10 bg-gray-100 dark:bg-slate-800 rounded-xl flex items-center justify-center text-gray-400 group-hover:text-indigo-500 transition-all z-10">
-            ⚙️
-          </div>
-          <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full -mr-16 -mt-16 pointer-events-none" />
-        </button>
-      </SlideUp>
+        </section>
+      )}
 
-      {/* Bento Grid Layout */}
-      <section className="grid grid-cols-2 gap-4">
-        <button 
-          onClick={() => setCurrentMode('talk_listen')}
-          className="col-span-2 bg-blue-600 p-8 rounded-[3rem] text-white flex items-center justify-between shadow-2xl shadow-blue-500/30 bento-card border-b-8 border-blue-800"
-        >
-          <div className="space-y-2 text-left">
-            <span className="text-4xl">💬</span>
-            <div className="flex flex-col">
-              <h3 className="text-2xl font-black tracking-tighter leading-none">{t('talk_listen_label', 'Talk & Listen')}</h3>
-              <p className="text-blue-100/60 text-[10px] font-bold uppercase tracking-widest">STT • TTS • REALTIME</p>
-            </div>
-          </div>
-          <span className="text-4xl opacity-50">→</span>
-        </button>
-
-        <button 
-          onClick={() => setCurrentMode('sign')}
-          className="bg-purple-600 p-6 rounded-[2.5rem] text-white flex flex-col items-center justify-center space-y-3 shadow-2xl shadow-purple-500/30 bento-card border-b-8 border-purple-800"
-        >
-          <span className="text-5xl">🤟</span>
-          <span className="text-xs font-black uppercase tracking-tighter">{t('sign_label', 'Sign Scan')}</span>
-        </button>
-
-        <button 
-          onClick={() => setCurrentMode('nearby')}
-          className="bg-emerald-600 p-6 rounded-[2.5rem] text-white flex flex-col items-center justify-center space-y-3 shadow-2xl shadow-emerald-500/30 bento-card border-b-8 border-emerald-800"
-        >
-          <span className="text-5xl">📍</span>
-          <span className="text-xs font-black uppercase tracking-tighter">{t('nearby_label', 'Nearby Help')}</span>
-        </button>
-      </section>
-
-      {/* Quick Phrases Section */}
       <section className="space-y-6">
-        <div className="flex justify-between items-end px-2">
-          <h3 className="text-gray-400 dark:text-slate-500 font-black uppercase text-[10px] tracking-widest">{t('frequent', 'Quick Messages')}</h3>
-          <button onClick={() => setIsManagingPhrases(!isManagingPhrases)} className="text-[10px] font-black text-indigo-500 bg-indigo-500/10 px-4 py-1.5 rounded-full uppercase tracking-widest">
-            {isManagingPhrases ? t('done', 'DONE') : t('manage', 'EDIT')}
-          </button>
-        </div>
-        
+        <h3 className="text-slate-500 font-black uppercase text-[10px] tracking-widest px-2">Quick Access</h3>
         <div className="grid grid-cols-1 gap-4">
-          {customPhrases.map((phrase, i) => (
-            <SlideUp key={phrase.id} delay={`${i * 100}ms`}>
-              <div className="relative">
-                <button
-                  onClick={() => !isManagingPhrases && speak(getPhraseLabel(phrase))}
-                  className={`w-full glass dark:bg-slate-900/50 p-6 rounded-[2.5rem] flex items-center justify-between shadow-lg border border-gray-100 dark:border-slate-800 bento-card ${!isManagingPhrases ? 'active:bg-indigo-50 dark:active:bg-indigo-900/20' : ''}`}
-                >
-                  <div className="flex items-center space-x-6">
-                    <span className="text-3xl w-14 h-14 flex items-center justify-center bg-gray-100 dark:bg-slate-800 rounded-3xl group-hover:scale-110 transition-transform">{phrase.icon}</span>
-                    <span className="font-extrabold text-gray-800 dark:text-slate-100 text-lg tracking-tight">{getPhraseLabel(phrase)}</span>
-                  </div>
-                  {!isManagingPhrases && <div className="w-10 h-10 bg-indigo-50 dark:bg-slate-800 rounded-full flex items-center justify-center text-indigo-500">🔊</div>}
-                </button>
-                {isManagingPhrases && (
-                  <button onClick={() => deletePhrase(phrase.id)} className="absolute -top-2 -right-2 bg-red-500 text-white w-10 h-10 rounded-full shadow-2xl font-bold flex items-center justify-center z-10">✕</button>
-                )}
+          {QUICK_PHRASES.map((phrase) => (
+            <button 
+              key={phrase.id}
+              onClick={() => speak(phrase.translations?.[lang.code] || phrase.label, phrase.id)}
+              className={`w-full glass-card p-6 rounded-[2.5rem] flex items-center justify-between shadow-xl transition-all border border-white/10 ${playingId === phrase.id ? 'bg-indigo-600/20 ring-4 ring-indigo-500/50 scale-[1.02]' : 'active:scale-95'}`}
+            >
+              <div className="flex items-center space-x-6">
+                <span className="text-4xl w-16 h-16 flex items-center justify-center bg-white/5 rounded-3xl border border-white/5">{phrase.icon}</span>
+                <div className="text-left">
+                  <span className="font-black text-xl tracking-tight block">{phrase.translations?.[lang.code] || phrase.label}</span>
+                  <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest mt-1">{phrase.category}</span>
+                </div>
               </div>
-            </SlideUp>
-          ))}
-          {isManagingPhrases && (
-            <button onClick={() => { setModalType('add_phrase'); setModalInput(''); }} className="w-full border-4 border-dashed border-gray-200 dark:border-slate-800 p-8 rounded-[3rem] font-black text-gray-400 uppercase tracking-widest text-[11px] hover:border-indigo-500 transition-colors">
-              + {t('add_new', 'New phrase')}
+              {playingId === phrase.id ? <Waveform color="bg-white" /> : <div className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center text-indigo-500 text-xl">🔊</div>}
             </button>
-          )}
+          ))}
         </div>
       </section>
 
-      <SlideUp delay="400ms">
-        <button 
-          onClick={() => { if("vibrate" in navigator) navigator.vibrate([100, 100, 100]); alert('SOS Triggered!'); }}
-          className="w-full bg-red-600 p-10 rounded-[3rem] text-white flex flex-col items-center shadow-[0_0_50px_rgba(220,38,38,0.4)] border-b-[10px] border-red-900 active:scale-95 transition-all bento-card"
-        >
-          <span className="text-7xl mb-2">🆘</span>
-          <span className="text-xl font-black tracking-widest uppercase">{t('emergency_sos', 'Emergency SOS')}</span>
-        </button>
+      <SlideUp delay="300ms">
+        <div className="grid grid-cols-2 gap-4 h-44">
+           <button 
+              onClick={() => setCurrentMode('sos')}
+              className="bg-gradient-to-br from-red-600 to-red-700 rounded-[3rem] p-8 flex flex-col items-center justify-center gap-3 shadow-[0_20px_40px_rgba(220,38,38,0.3)] border-b-8 border-red-900 active:scale-95 transition-all"
+           >
+              <span className="text-5xl">🆘</span>
+              <span className="font-black text-white tracking-widest uppercase text-xs">SOS Hub</span>
+           </button>
+           <button 
+              onClick={() => setCurrentMode('nearby')}
+              className="bg-gradient-to-br from-emerald-600 to-emerald-700 rounded-[3rem] p-8 flex flex-col items-center justify-center gap-3 shadow-[0_20px_40px_rgba(5,150,105,0.3)] border-b-8 border-emerald-900 active:scale-95 transition-all"
+           >
+              <span className="text-5xl">📍</span>
+              <span className="font-black text-white tracking-widest uppercase text-xs">Find Help</span>
+           </button>
+        </div>
       </SlideUp>
     </div>
   );
 
   const renderTalkListen = () => (
-    <div className="flex flex-col h-full bg-gray-50 dark:bg-slate-950 p-4 space-y-4">
-      {/* Dynamic Display Area */}
-      <div className="flex-1 flex flex-col space-y-4">
-        {/* Listen (Received) Area */}
-        <div className="h-[45%] glass dark:bg-slate-900/60 rounded-[3rem] p-8 flex flex-col items-center justify-center text-center shadow-2xl relative overflow-hidden group">
-          <div className="absolute top-6 left-1/2 -translate-x-1/2 opacity-20 pointer-events-none group-hover:opacity-40 transition-opacity">
-            <span className="text-8xl">👂</span>
-          </div>
-          {isTranslating ? (
-            <div className="space-y-4 flex flex-col items-center">
-              <div className="flex space-x-2">
-                <div className="w-3 h-3 bg-indigo-500 rounded-full animate-bounce" />
-                <div className="w-3 h-3 bg-indigo-500 rounded-full animate-bounce delay-150" />
-                <div className="w-3 h-3 bg-indigo-500 rounded-full animate-bounce delay-300" />
-              </div>
-              <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Translating voice...</p>
+    <div className="flex flex-col h-full p-4 space-y-4 pb-32 overflow-hidden">
+      <div className="flex-1 space-y-4 flex flex-col">
+        <div className={`h-[45%] glass rounded-[3rem] p-8 flex flex-col items-center justify-center text-center shadow-2xl relative border-2 ${isListening ? 'border-green-500/40 bg-green-500/5' : 'border-white/5'}`}>
+          {isListening ? (
+             <div className="flex flex-col items-center gap-6 w-full">
+               <div className="flex items-center justify-center gap-1.5 h-16 w-full">
+                 {[...Array(24)].map((_, i) => (
+                   <div key={i} className="w-1.5 bg-green-500 rounded-full animate-waveform" style={{ height: `${Math.random() * 50 + 10}px`, animationDelay: `${i * 0.05}s` }} />
+                 ))}
+               </div>
+               <p className="text-2xl font-black text-white tracking-tight animate-pulse">{transcript || "Listening..."}</p>
+             </div>
+          ) : isTranslating ? (
+            <div className="flex flex-col items-center gap-6">
+              <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+              <p className="text-[10px] font-black uppercase tracking-widest text-indigo-500 animate-pulse">Translating...</p>
             </div>
           ) : transcript ? (
-            <div className="space-y-6 w-full animate-fade-in">
-              <p className="text-[11px] font-black text-indigo-500 uppercase tracking-[0.3em]">{t('heard', 'THEY SAID')}</p>
-              <h2 className="text-5xl font-black dark:text-white leading-none tracking-tighter">{transcript}</h2>
-              <button onClick={() => speak(transcript)} className="px-8 py-3 bg-indigo-500/10 text-indigo-500 rounded-full font-black uppercase text-[10px] tracking-widest">🔊 {t('speak', 'REPLAY')}</button>
+            <div className="space-y-6 w-full">
+              <p className="text-[11px] font-black text-indigo-500 uppercase tracking-[0.3em]">TRANSCRIPTION</p>
+              <h2 className="text-4xl font-black tracking-tighter leading-tight break-words">{transcript}</h2>
+              <div className="flex items-center gap-3 justify-center">
+                 <div className="w-32 h-2 bg-white/10 rounded-full overflow-hidden">
+                   <div className={`h-full transition-all duration-1000 ${confidence > 0.8 ? 'bg-green-500' : 'bg-yellow-500'}`} style={{ width: `${confidence * 100}%` }} />
+                 </div>
+                 <span className="text-[9px] font-black text-slate-500 uppercase">{Math.round(confidence * 100)}% Confidence</span>
+              </div>
             </div>
           ) : (
-            <div className="space-y-3 z-10">
-              <p className="text-2xl font-black text-slate-300 dark:text-slate-700 tracking-tighter px-10">{t('awaiting_voice', 'Tap LISTEN to hear them...')}</p>
-            </div>
+             <p className="text-3xl font-black text-slate-700 tracking-tighter leading-none px-12">Tap LISTEN to translate speech into text...</p>
           )}
         </div>
-
-        {/* Talk (Output) Area */}
-        <div className="h-[55%] flex flex-col relative group">
-          <div className="absolute top-6 right-6 z-10 flex items-center space-x-2">
-            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{isPhoneticEnabled ? 'Phonetic On' : 'Standard'}</span>
-            <button onClick={() => setIsPhoneticEnabled(!isPhoneticEnabled)} className={`w-12 h-6 rounded-full transition-all relative ${isPhoneticEnabled ? 'bg-indigo-600' : 'bg-slate-300 dark:bg-slate-700'}`}>
-              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${isPhoneticEnabled ? 'right-1' : 'left-1'}`} />
-            </button>
-          </div>
-
-          <textarea 
-            autoFocus 
-            value={inputText} 
-            onChange={handleInputChange} 
-            placeholder={t('type_placeholder', 'What do you want to say?')}
-            className="flex-1 glass dark:bg-slate-900/60 p-10 text-3xl font-black border-none rounded-[3rem] dark:text-white focus:ring-8 focus:ring-indigo-500/10 shadow-2xl resize-none placeholder:text-slate-300 dark:placeholder:text-slate-800 transition-all"
-          />
-
-          {keyboardSuggestions.length > 0 && (
-            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex space-x-2 animate-slide-up">
-              {keyboardSuggestions.map((s, idx) => (
-                <button key={idx} onClick={() => applySuggestion(s)} className="bg-indigo-600 text-white px-8 py-4 rounded-3xl font-black text-lg shadow-2xl shadow-indigo-500/40 active:scale-95 transition-transform">
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <textarea 
+          value={inputText} 
+          onChange={(e) => setInputText(e.target.value)}
+          placeholder="Type message here..." 
+          className="flex-1 glass p-10 text-4xl font-black border-none rounded-[3.5rem] focus:ring-0 shadow-2xl resize-none placeholder:text-slate-800"
+        />
       </div>
-
-      <div className="grid grid-cols-2 gap-4 h-32">
-        <button onClick={startListening} className={`${isListening ? 'bg-red-500 animate-pulse' : 'bg-green-600'} text-white rounded-[2.5rem] font-black text-2xl shadow-2xl bento-card border-b-8 ${isListening ? 'border-red-800' : 'border-green-800'}`}>
-          {isListening ? t('stop', 'STOP') : t('listen', 'LISTEN')}
+      <div className="grid grid-cols-2 gap-4 h-32 shrink-0">
+        <button onClick={startListening} className={`${isListening ? 'bg-red-500' : 'bg-green-600'} text-white rounded-[2.5rem] font-black text-2xl shadow-xl bento-card border-b-8 ${isListening ? 'border-red-900' : 'border-green-900'} flex items-center justify-center gap-3`}>
+          {isListening ? 'STOP' : '🎙️ LISTEN'}
         </button>
-        <button onClick={() => speak(inputText)} className="bg-blue-600 text-white rounded-[2.5rem] font-black text-2xl shadow-2xl bento-card border-b-8 border-blue-800">
-          {t('speak', 'SPEAK')}
-        </button>
+        <button onClick={() => speak(inputText)} className="bg-blue-600 text-white rounded-[2.5rem] font-black text-2xl shadow-xl bento-card border-b-8 border-blue-900">🔊 SPEAK</button>
       </div>
-
-      <button onClick={() => setCurrentMode('home')} className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.5em] py-4">{t('back', '← BACK HOME')}</button>
     </div>
   );
 
-  const renderSign = () => (
-    <div className="flex flex-col h-full bg-slate-950 p-4 space-y-4">
-      <div className="relative flex-1 bg-black rounded-[3rem] overflow-hidden shadow-[0_0_80px_rgba(147,51,234,0.3)]">
-        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
-        <canvas ref={canvasRef} className="hidden" />
-        <div className="absolute inset-0 border-[20px] border-white/5 pointer-events-none rounded-[3rem]" />
-        
-        {(isSignLoading || isLiveScanning) && (
-          <div className="absolute top-10 right-10 bg-indigo-600/90 backdrop-blur-xl text-white px-6 py-2 rounded-full text-[10px] font-black tracking-widest flex items-center space-x-3 shadow-2xl">
-            <span className="w-2 h-2 bg-white rounded-full animate-ping" />
-            <span>{isLiveScanning ? 'LIVE SCAN ACTIVE' : 'RECOGNIZING...'}</span>
-          </div>
-        )}
-      </div>
+  const renderSignScan = () => (
+    <div className="flex flex-col h-full bg-slate-950 p-4 space-y-4 pb-32">
+        <div className="relative flex-1 bg-black rounded-[3.5rem] overflow-hidden shadow-2xl group border-4 border-white/5">
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
+            <canvas ref={canvasRef} className="hidden" />
+            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                <div className="w-72 h-72 relative border-white/20 border-2 rounded-2xl">
+                    <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-indigo-500 rounded-tl-xl animate-pulse" />
+                    <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-indigo-500 rounded-br-xl animate-pulse" />
+                </div>
+            </div>
+        </div>
+        <div className="h-1/3 glass rounded-[3.5rem] p-10 space-y-6 overflow-y-auto custom-scrollbar shadow-2xl border-t border-white/10">
+            <p className="text-[10px] font-black text-indigo-500 uppercase tracking-[0.3em]">Interpretation</p>
+            <h2 className="text-5xl font-black leading-tight tracking-tighter break-words">{transcript || "Awaiting sign..."}</h2>
+        </div>
+        <div className="grid grid-cols-2 gap-4 h-28 shrink-0">
+            <button onClick={handleCapture} disabled={isSignLoading} className="bg-purple-600 text-white rounded-[2.5rem] font-black text-2xl shadow-xl bento-card border-b-8 border-purple-900 disabled:opacity-30">📸 SNAP</button>
+            <button onClick={() => setIsLiveScanning(!isLiveScanning)} className={`${isLiveScanning ? 'bg-red-500' : 'bg-indigo-600'} text-white rounded-[2.5rem] font-black text-2xl shadow-xl bento-card border-b-8 ${isLiveScanning ? 'border-red-900' : 'border-indigo-900'}`}>{isLiveScanning ? '⏹️ STOP' : '📡 LIVE'}</button>
+        </div>
+    </div>
+  );
 
-      <div className="h-1/3 glass dark:bg-slate-900 rounded-[3rem] p-10 shadow-2xl border border-white/5 space-y-4">
-        <p className="text-[10px] font-black text-indigo-500 uppercase tracking-[0.3em]">{t('detected', 'TRANSLATED GESTURE')}</p>
-        <h2 className="text-5xl font-black dark:text-white leading-none tracking-tighter break-words">
-          {transcript || <span className="text-slate-700">Waiting for signs...</span>}
-        </h2>
-        {transcript && <button onClick={() => speak(transcript)} className="text-indigo-500 font-black uppercase text-[11px] tracking-widest bg-indigo-500/10 px-6 py-2 rounded-full">🔊 {t('speak', 'SPEAK RESULT')}</button>}
-      </div>
+  const renderSOS = () => (
+    <div className="p-8 space-y-8 pb-40 overflow-y-auto custom-scrollbar h-full">
+      <FadeIn>
+        <div className="space-y-2">
+          <h2 className="text-6xl font-black tracking-tighter">SOS Hub</h2>
+          <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">Critical Response</p>
+        </div>
+      </FadeIn>
 
-      <div className="grid grid-cols-2 gap-4 h-24 shrink-0">
-        <button onClick={captureAndInterpret} disabled={isSignLoading} className="bg-purple-600 text-white rounded-[2rem] font-black text-xl shadow-xl bento-card border-b-4 border-purple-800 disabled:opacity-30">SNAP</button>
-        <button onClick={() => setIsLiveScanning(!isLiveScanning)} className={`${isLiveScanning ? 'bg-red-500' : 'bg-indigo-600'} text-white rounded-[2rem] font-black text-xl shadow-xl bento-card border-b-4 ${isLiveScanning ? 'border-red-800' : 'border-indigo-800'}`}>
-          {isLiveScanning ? 'STOP' : 'LIVE'}
+      <div className="grid grid-cols-2 gap-4">
+        <button onClick={() => act911('call')} className="p-8 bg-red-600 rounded-[3rem] flex flex-col items-center justify-center gap-3 border-b-8 border-red-900 shadow-xl active:scale-95 transition-transform">
+          <span className="text-5xl">📞</span>
+          <span className="text-sm font-black text-white uppercase tracking-widest">Call 911</span>
+        </button>
+        <button onClick={() => act911('text')} className="p-8 bg-orange-600 rounded-[3rem] flex flex-col items-center justify-center gap-3 border-b-8 border-orange-900 shadow-xl active:scale-95 transition-transform">
+          <span className="text-5xl">✉️</span>
+          <span className="text-sm font-black text-white uppercase tracking-widest">Text 911</span>
         </button>
       </div>
 
-      <button onClick={() => setCurrentMode('home')} className="text-center text-[10px] font-black text-slate-500 uppercase tracking-[0.4em] py-4">{t('back', '← BACK HOME')}</button>
+      <button onClick={shareLocationWithContacts} className="w-full bg-indigo-600 p-10 rounded-[3rem] text-white font-black uppercase text-xl tracking-widest shadow-2xl active:scale-95 transition-all flex items-center justify-center gap-4">
+        <span className="text-3xl">📍</span>
+        Alert Contacts
+      </button>
+
+      <section className="space-y-4">
+        <h3 className="text-slate-500 font-black text-[10px] uppercase tracking-widest ml-4">Emergency Contacts</h3>
+        <div className="space-y-3">
+          {emergencyContacts.map((contact, i) => (
+            <div key={i} className="glass p-6 rounded-[2.5rem] flex items-center justify-between border border-white/5">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-white/5 rounded-2xl flex items-center justify-center text-xl">👤</div>
+                <div>
+                  <h4 className="font-black text-lg">{contact.name}</h4>
+                  <p className="text-[10px] font-bold text-slate-500">{contact.phone}</p>
+                </div>
+              </div>
+              <a href={`tel:${contact.phone}`} className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center hover:bg-indigo-600 transition-colors">📞</a>
+            </div>
+          ))}
+          <button onClick={() => setModalType('add_contact')} className="w-full border-4 border-dashed border-white/5 p-8 rounded-[3rem] font-black text-slate-600 uppercase tracking-widest text-xs">
+            + Add Contact
+          </button>
+        </div>
+      </section>
     </div>
   );
 
   const renderNearby = () => (
-    <div className="flex flex-col h-full bg-gray-50 dark:bg-slate-950 p-6 space-y-10 overflow-y-auto pb-32 custom-scrollbar">
+    <div className="p-6 space-y-8 pb-40 overflow-y-auto custom-scrollbar h-full">
       <div className="space-y-2">
-        <h2 className="text-5xl font-black dark:text-white tracking-tighter leading-none">{t('nearby_label', 'Places')}</h2>
-        {currentCoords && (
-          <div className="flex items-center space-x-2 bg-emerald-500/10 text-emerald-600 px-4 py-1.5 rounded-full w-fit">
-            <span className="animate-pulse">📍</span>
-            <span className="text-[10px] font-black uppercase tracking-widest">{currentCoords.lat.toFixed(3)}, {currentCoords.lng.toFixed(3)}</span>
-          </div>
-        )}
+        <h2 className="text-5xl font-black tracking-tighter">Nearby Services</h2>
+        <p className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">Real-time location Discovery</p>
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto no-scrollbar py-2">
+        {([
+          { id: 'hospital', label: 'Hospitals', icon: '🏥', color: 'bg-red-600' },
+          { id: 'police', label: 'Police', icon: '🚔', color: 'bg-blue-600' },
+          { id: 'pharmacy', label: 'Pharmacy', icon: '💊', color: 'bg-emerald-600' }
+        ] as const).map(cat => (
+          <button 
+            key={cat.id} 
+            onClick={() => setActiveFilter(cat.id)}
+            className={`flex-shrink-0 px-8 py-5 rounded-[2.5rem] font-black text-xs uppercase tracking-widest flex items-center gap-4 border transition-all ${activeFilter === cat.id ? `${cat.color} text-white border-transparent shadow-xl scale-105` : 'bg-slate-800/50 text-slate-500 border-white/5'}`}
+          >
+            <span className="text-2xl">{cat.icon}</span>
+            {cat.label}
+          </button>
+        ))}
       </div>
 
       {isNearbyLoading ? (
-        <div className="flex-1 flex flex-col items-center justify-center space-y-6">
-          <div className="w-24 h-24 relative">
-            <div className="absolute inset-0 border-8 border-emerald-500/10 rounded-full" />
-            <div className="absolute inset-0 border-8 border-t-emerald-500 rounded-full animate-spin" />
+        <div className="flex-1 flex flex-col items-center justify-center py-20 space-y-6">
+          <div className="w-20 h-20 border-8 border-indigo-500/10 border-t-indigo-500 rounded-full animate-spin" />
+          <p className="text-slate-500 font-black text-[10px] uppercase tracking-widest animate-pulse">Scanning map grounding...</p>
+        </div>
+      ) : nearbyResults[activeFilter].links.length > 0 ? (
+        <div className="space-y-4">
+          <div className="glass p-8 rounded-[3rem] mb-4">
+            <p className="text-sm font-bold text-slate-300 italic leading-relaxed">"{nearbyResults[activeFilter].text}"</p>
           </div>
-          <p className="text-slate-400 font-black text-[11px] uppercase tracking-[0.4em] animate-pulse">{t('finding_places', 'SCANNING NEARBY...')}</p>
+          {nearbyResults[activeFilter].links.map((link: any, idx: number) => (
+            <div key={idx} className="glass-card p-6 rounded-[2.5rem] flex items-center justify-between border border-white/10 group">
+              <div className="flex-1 flex items-center gap-5">
+                <div className={`w-16 h-16 rounded-3xl flex items-center justify-center text-3xl ${idx === 0 ? 'bg-indigo-600/20 text-indigo-400' : 'bg-white/5 text-slate-400'}`}>📍</div>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-black text-white text-lg tracking-tight truncate max-w-[200px]">{link.title || 'Facility'}</h4>
+                    {idx === 0 && <span className="bg-emerald-500/20 text-emerald-500 text-[8px] px-2 py-0.5 rounded-full font-black uppercase">Closest</span>}
+                  </div>
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Maps Integration Available</p>
+                </div>
+              </div>
+              <a href={link.uri} target="_blank" rel="noopener noreferrer" className="w-16 h-16 bg-indigo-600 text-white rounded-full flex items-center justify-center text-xl shadow-lg hover:bg-indigo-500 active:scale-90 transition-all">↗</a>
+            </div>
+          ))}
+          <button onClick={performSearch} className="w-full bg-slate-800/50 p-6 rounded-[2.5rem] font-black uppercase text-[10px] tracking-widest text-slate-500 border border-white/5 mt-4">Redo Search</button>
         </div>
       ) : (
-        <div className="space-y-8">
-          <div className="glass dark:bg-slate-900 p-10 rounded-[3rem] shadow-2xl border border-white/5">
-            <p className="text-xl font-extrabold dark:text-white leading-relaxed text-slate-700 italic">
-              "{nearbyResults?.text}"
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4">
-            {nearbyResults?.links.map((link, idx) => (
-              <SlideUp key={idx} delay={`${idx * 150}ms`}>
-                <a 
-                  href={link.uri} 
-                  target="_blank" 
-                  rel="noreferrer"
-                  className="bg-white dark:bg-slate-800 p-8 rounded-[2.5rem] flex items-center justify-between shadow-xl active:scale-95 transition-all bento-card border border-gray-100 dark:border-slate-700"
-                >
-                  <div className="flex items-center space-x-6">
-                    <span className="text-4xl">🗺️</span>
-                    <div className="flex flex-col">
-                      <span className="font-black text-gray-900 dark:text-white text-lg tracking-tight uppercase leading-none">{link.title || 'View Place'}</span>
-                      <span className="text-[10px] text-emerald-500 font-black uppercase tracking-widest mt-1">Open Directions</span>
-                    </div>
-                  </div>
-                  <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center text-emerald-600">↗</div>
-                </a>
-              </SlideUp>
-            ))}
-          </div>
-
-          <button onClick={fetchNearby} className="w-full bg-gray-200 dark:bg-slate-800/50 p-6 rounded-[2.5rem] font-black uppercase text-[10px] tracking-[0.4em] text-gray-500 active:scale-95 transition-all">
-            Refresh Map
-          </button>
+        <div className="text-center py-20 space-y-10">
+          <div className="text-9xl opacity-10 filter grayscale">🗺️</div>
+          <button onClick={performSearch} className="w-full active-gradient p-10 rounded-[3rem] text-white font-black uppercase text-xl tracking-widest shadow-2xl animate-gradient-shift">Scan Location</button>
         </div>
       )}
-
-      <button onClick={() => setCurrentMode('home')} className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.5em] py-4">{t('back', '← BACK HOME')}</button>
     </div>
   );
 
-  const getPhraseLabel = (phrase: QuickPhrase) => phrase.translations?.[lang.code] || phrase.label;
-  const deletePhrase = (id: string) => setCustomPhrases(customPhrases.filter(p => p.id !== id));
-  const applySuggestion = (suggestion: string) => {
-    const words = inputText.split(/\s+/);
-    words.pop();
-    setInputText((words.join(' ') + ' ' + suggestion).trim() + ' ');
-    setKeyboardSuggestions([]);
-    if ("vibrate" in navigator) navigator.vibrate(30);
-  };
-
-  const handleLangChange = (l: AppLanguage) => {
-    startTransition(() => {
-      setLang(l);
-    });
-  };
-
-  return (
-    <div className="max-w-md mx-auto h-screen bg-white dark:bg-slate-950 flex flex-col antialiased relative shadow-[0_0_100px_rgba(0,0,0,0.1)]">
-      <div className="sticky top-0 z-50">
-        {user && <Header currentLang={lang} user={user} onLogout={logout} theme={theme} onThemeChange={setTheme} t={t} />}
-        <LanguageSelector currentLang={lang} allLanguages={availableLanguages} onLangChange={handleLangChange} onAddLang={() => { setModalType('add_lang'); setModalInput(''); }} />
-      </div>
-
-      <main className="flex-1 overflow-y-auto custom-scrollbar">
-        {!user ? renderAuth() : (
-          <FadeIn>
-            {currentMode === 'home' && renderHome()}
-            {currentMode === 'talk_listen' && renderTalkListen()}
-            {currentMode === 'sign' && renderSign()}
-            {currentMode === 'nearby' && renderNearby()}
-          </FadeIn>
-        )}
-      </main>
-      
-      {/* Dynamic Status Bar */}
-      <div className="glass px-8 py-4 flex justify-between border-t border-gray-100/50 dark:border-slate-800/50 shrink-0">
-        <div className="flex items-center space-x-3">
-          <span className="relative flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
-          </span>
-          <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">System Ready</span>
-        </div>
-        <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">SpeakEase V8.0 Interactive</span>
-      </div>
-
-      {/* Shared Modals */}
-      <Modal isOpen={modalType === 'add_lang'} onClose={() => setModalType('none')} title="Add Language">
-        <div className="space-y-6">
-          <input type="text" autoFocus value={modalInput} onChange={(e) => setModalInput(e.target.value)} className="w-full bg-gray-50 dark:bg-slate-800 p-8 rounded-[2rem] border-none font-black text-2xl dark:text-white shadow-inner" placeholder="Icelandic..." />
-          <button onClick={async () => {
-            if (!modalInput) return;
-            setIsTranslatingUI(true);
-            const details = await findLanguageDetails(modalInput);
-            if (details) {
-              setAvailableLanguages(p => [...p.filter(l => l.code !== details.code), details]);
-              setLang(details);
-            }
-            setModalType('none');
-            setIsTranslatingUI(false);
-          }} className="w-full bg-indigo-600 text-white p-6 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl">Identify & Add</button>
-        </div>
-      </Modal>
-
-      <Modal isOpen={modalType === 'add_phrase'} onClose={() => setModalType('none')} title="Quick Message">
-        <div className="space-y-6">
-          <textarea autoFocus value={modalInput} onChange={(e) => setModalInput(e.target.value)} className="w-full bg-gray-50 dark:bg-slate-800 p-8 rounded-[2rem] border-none font-black text-2xl dark:text-white shadow-inner h-48 resize-none" placeholder="Type message..." />
-          <button onClick={() => {
-            if (!modalInput) return;
-            setCustomPhrases([...customPhrases, { id: Date.now().toString(), label: modalInput, icon: '💬', category: 'social' }]);
-            setModalType('none');
-          }} className="w-full bg-indigo-600 text-white p-6 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl">Save Message</button>
-        </div>
-      </Modal>
-
-      <Modal isOpen={modalType === 'voice_settings'} onClose={() => setModalType('none')} title={t('voice_settings', 'Voice Settings')}>
-        <div className="space-y-4">
-          <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-4">{t('select_voice', 'Select Voice Personality')}</p>
-          <div className="space-y-2">
-            {languageVoices.length === 0 ? (
-              <p className="text-slate-400 font-bold text-sm italic py-4">No specific voices found for this language. Using system default.</p>
-            ) : (
-              languageVoices.map((voice) => (
-                <button
-                  key={voice.voiceURI}
-                  onClick={() => {
-                    setSelectedVoiceURI(voice.voiceURI);
-                    speak("Test Voice Activated");
-                  }}
-                  className={`w-full p-4 rounded-2xl flex items-center justify-between border-2 transition-all ${
-                    selectedVoiceURI === voice.voiceURI
-                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg'
-                      : 'bg-gray-50 dark:bg-slate-800 text-gray-700 dark:text-slate-200 border-transparent hover:border-indigo-300'
-                  }`}
-                >
-                  <div className="flex flex-col items-start">
-                    <span className="font-black text-sm">{voice.name}</span>
-                    <span className={`text-[9px] uppercase tracking-widest ${selectedVoiceURI === voice.voiceURI ? 'text-indigo-100' : 'text-slate-400'}`}>{voice.lang}</span>
-                  </div>
-                  {selectedVoiceURI === voice.voiceURI && <span>✓</span>}
-                </button>
-              ))
-            )}
-            <button
-              onClick={() => {
-                setSelectedVoiceURI('');
-                speak("Default Voice Selected");
-              }}
-              className={`w-full p-4 rounded-2xl flex items-center justify-between border-2 transition-all mt-4 ${
-                selectedVoiceURI === ''
-                  ? 'bg-slate-600 text-white border-slate-600 shadow-lg'
-                  : 'bg-gray-50 dark:bg-slate-800 text-gray-700 dark:text-slate-200 border-transparent hover:border-slate-300'
-              }`}
-            >
-              <span className="font-black text-sm">System Default</span>
-              {selectedVoiceURI === '' && <span>✓</span>}
+  const renderSettings = () => (
+    <div className="p-8 space-y-10 overflow-y-auto custom-scrollbar h-full pb-32">
+      <header className="flex items-center gap-6">
+        <button onClick={() => setCurrentMode('home')} className="w-14 h-14 glass rounded-full flex items-center justify-center text-2xl active:scale-90 transition-transform">←</button>
+        <h2 className="text-5xl font-black tracking-tighter">Settings</h2>
+      </header>
+      <div className="space-y-12">
+        <section className="space-y-6">
+          <h3 className="text-slate-500 font-black text-[10px] uppercase tracking-widest ml-2">Speech Options</h3>
+          <div className="space-y-4">
+            <div className="glass p-8 rounded-[3rem] space-y-4">
+              <div className="flex justify-between items-center px-2">
+                <span className="font-black text-xs uppercase tracking-widest">Rate</span>
+                <span className="text-indigo-500 font-black">{voiceSpeed.toFixed(1)}x</span>
+              </div>
+              <input type="range" min="0.5" max="2" step="0.1" value={voiceSpeed} onChange={(e) => setVoiceSpeed(parseFloat(e.target.value))} className="w-full accent-indigo-500 bg-white/10 h-3 rounded-full cursor-pointer" />
+            </div>
+            <button onClick={() => setModalType('voice_settings')} className="w-full glass p-8 rounded-[3rem] flex items-center justify-between group">
+              <div className="flex flex-col text-left">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Voice Personality</span>
+                <span className="font-black text-2xl tracking-tight text-white">{currentVoiceName}</span>
+              </div>
+              <div className="w-14 h-14 bg-white/5 rounded-full flex items-center justify-center text-indigo-500 group-hover:bg-indigo-500 group-hover:text-white transition-all text-xl">⚙️</div>
             </button>
           </div>
-          <button onClick={() => setModalType('none')} className="w-full bg-indigo-600 text-white p-6 rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl mt-6">{t('done', 'Done')}</button>
+        </section>
+        <section className="space-y-6">
+          <h3 className="text-slate-500 font-black text-[10px] uppercase tracking-widest ml-2">Device Feedback</h3>
+          <button 
+            onClick={() => setHapticsEnabled(!hapticsEnabled)}
+            className="w-full glass p-8 rounded-[3rem] flex items-center justify-between"
+          >
+            <span className="font-black text-xs uppercase tracking-widest text-white">Haptic Pulse</span>
+            <div className={`w-14 h-8 rounded-full flex items-center px-1 transition-colors ${hapticsEnabled ? 'bg-indigo-600' : 'bg-slate-700'}`}>
+              <div className={`w-6 h-6 bg-white rounded-full shadow-sm transform transition-transform ${hapticsEnabled ? 'translate-x-6' : 'translate-x-0'}`} />
+            </div>
+          </button>
+        </section>
+        <button onClick={() => { setUser(null); localStorage.removeItem('speakease-user'); }} className="w-full bg-red-500/10 text-red-500 p-8 rounded-[3rem] font-black uppercase text-xs tracking-widest border border-red-500/20 active:bg-red-500 active:text-white transition-all">Log Out</button>
+      </div>
+    </div>
+  );
+
+  const renderAuth = () => (
+    <div className="flex-1 flex flex-col bg-slate-950 p-10 space-y-12 items-center justify-center h-full">
+      <SlideUp><div className="text-[140px] animate-bounce-gentle">🤟</div></SlideUp>
+      <div className="text-center space-y-3">
+        <h1 className="text-7xl font-black text-white tracking-tighter">SpeakEase</h1>
+        <p className="text-indigo-400 font-black uppercase tracking-[0.5em] text-[11px]">Accessibility Bridge</p>
+      </div>
+      <div className="w-full max-w-sm space-y-4 pt-4">
+        {isAuthLoading ? (
+          <div className="text-indigo-500 text-center font-black animate-pulse text-2xl uppercase tracking-widest">Verifying Identity...</div>
+        ) : (
+          <>
+            <button onClick={loginWithGoogle} className="w-full bg-white text-slate-950 p-8 rounded-[3rem] font-black text-xl shadow-[0_20px_60px_rgba(255,255,255,0.1)] flex items-center justify-center space-x-4 active:scale-95 transition-all border-b-[10px] border-slate-300">
+              <img src="https://www.google.com/favicon.ico" alt="" className="w-7 h-7" />
+              <span>Continue with Google</span>
+            </button>
+            <button onClick={loginAsGuest} className="w-full bg-slate-900 text-white p-8 rounded-[3rem] font-black text-xl shadow-2xl flex items-center justify-center space-x-4 active:scale-95 transition-all border border-slate-800 border-b-[10px] border-slate-950">
+              <span>Explore as Guest</span>
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  if (!user) return renderAuth();
+
+  return (
+    <div className="max-w-md mx-auto h-screen bg-slate-950 flex flex-col antialiased relative shadow-[0_0_100px_rgba(0,0,0,0.5)]">
+      {!isOnline && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[200] animate-slide-up">
+          <div className="px-6 py-3 bg-yellow-600 rounded-full shadow-2xl flex items-center gap-3">
+            <span className="text-white font-bold text-[10px] uppercase tracking-widest">Offline Mode Active</span>
+          </div>
+        </div>
+      )}
+
+      {currentMode !== 'settings' && (
+        <div className="sticky top-0 z-50">
+          <header className="bg-slate-950 px-6 py-4 flex justify-between items-center border-b border-white/5 shrink-0">
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-xl shadow-lg shadow-indigo-500/30">🤟</div>
+              <div>
+                <h1 className="text-lg font-black text-white tracking-tighter leading-none">SpeakEase</h1>
+                <p className="text-[9px] font-black text-indigo-500 uppercase tracking-widest mt-1">Accessibility Bridge</p>
+              </div>
+            </div>
+            <button onClick={() => setCurrentMode('settings')} className="w-10 h-10 rounded-full overflow-hidden border-2 border-indigo-500/40 active:scale-90 transition-transform">
+              <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${user.name}`} alt="profile" className="w-full h-full object-cover" />
+            </button>
+          </header>
+          <div className="glass border-b border-white/5 flex items-center shrink-0">
+            <div className="flex-1 flex overflow-x-auto py-4 px-4 space-x-3 no-scrollbar scroll-smooth">
+            {availableLanguages.map((l) => (
+              <button
+                key={l.code}
+                onClick={() => setLang(l)}
+                className={`flex-shrink-0 px-6 py-2.5 rounded-2xl text-[11px] font-extrabold transition-all border-2 ${
+                  lang.code === l.code ? 'bg-indigo-600 text-white border-indigo-600 shadow-xl' : 'bg-white/5 text-slate-500 border-white/5'
+                }`}
+              >
+              {l.nativeName}
+              </button>
+            ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <main className="flex-1 overflow-hidden relative">
+        <StandardErrorBoundary fallback={<div className="p-10 text-center">App Crashed. Please reload.</div>}>
+          <div className="h-full">
+            {currentMode === 'home' && renderHome()}
+            {currentMode === 'talk_listen' && renderTalkListen()}
+            {currentMode === 'sign' && renderSignScan()}
+            {currentMode === 'sos' && renderSOS()}
+            {currentMode === 'nearby' && renderNearby()}
+            {currentMode === 'settings' && renderSettings()}
+          </div>
+        </StandardErrorBoundary>
+      </main>
+
+      <nav className="glass border-t border-white/5 pb-safe z-50">
+        <div className="flex justify-around items-center h-20">
+          {[
+            { id: 'home', icon: '🏠', label: 'Home' },
+            { id: 'talk_listen', icon: '💬', label: 'Talk' },
+            { id: 'sign', icon: '🤟', label: 'Sign' },
+            { id: 'sos', icon: '🆘', label: 'SOS' },
+            { id: 'nearby', icon: '📍', label: 'Nearby' }
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setCurrentMode(tab.id as any)}
+              className={`flex flex-col items-center gap-1.5 px-4 py-2 rounded-2xl transition-all ${
+                currentMode === tab.id ? 'text-indigo-400 scale-110' : 'text-slate-600 opacity-40'
+              }`}
+            >
+              <span className="text-2xl">{tab.icon}</span>
+              <span className="text-[9px] font-black uppercase tracking-widest">{tab.label}</span>
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {/* SOS Confirmation Modal */}
+      <Modal 
+        isOpen={show911Confirmation} 
+        onClose={() => setShow911Confirmation(false)} 
+        title={emergencyType === 'call' ? 'Call 911' : 'Text 911'}
+        border="border-red-500/50"
+      >
+        <div className="space-y-8 text-center">
+          <div className="w-24 h-24 bg-red-600 rounded-full flex items-center justify-center mx-auto text-4xl shadow-[0_0_50px_rgba(220,38,38,0.5)]">🆘</div>
+          <div className="space-y-3">
+            <h2 className="text-2xl font-black text-white">Emergency Dispatch</h2>
+            <p className="text-slate-400 text-sm">Location sharing will be activated for emergency responders.</p>
+          </div>
+          <div className="glass p-6 rounded-[2.5rem] space-y-2 text-left bg-slate-800/50">
+            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">My Current Location</p>
+            <p className="font-bold text-white text-sm font-mono">{currentCoords ? `${currentCoords.lat.toFixed(5)}, ${currentCoords.lng.toFixed(5)}` : "Locating..."}</p>
+          </div>
+          <div className="flex gap-4">
+            <button onClick={() => setShow911Confirmation(false)} className="flex-1 glass p-6 rounded-[2rem] font-black uppercase text-sm">Cancel</button>
+            <button onClick={confirmSOS} className="flex-1 bg-red-600 p-6 rounded-[2rem] font-black uppercase text-sm text-white shadow-xl">Confirm</button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal isOpen={modalType === 'voice_settings'} onClose={() => setModalType('none')} title="Voice Persona">
+        <div className="space-y-3 max-h-[50vh] overflow-y-auto no-scrollbar">
+          {availableVoices.length > 0 ? availableVoices.map((voice) => (
+            <button
+              key={voice.voiceURI}
+              onClick={() => { setSelectedVoiceURI(voice.voiceURI); localStorage.setItem('speakease-voice-uri', voice.voiceURI); setModalType('none'); }}
+              className={`w-full p-6 rounded-[2rem] flex items-center justify-between border-2 transition-all ${selectedVoiceURI === voice.voiceURI ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white/5 border-transparent text-slate-400'}`}
+            >
+              <div className="flex flex-col items-start"><span className="font-black text-sm">{voice.name}</span><span className="text-[10px] opacity-40 uppercase tracking-widest">{voice.lang}</span></div>
+            </button>
+          )) : <p className="text-center py-10 opacity-50">Searching system voices...</p>}
+        </div>
+      </Modal>
+
+      <Modal isOpen={modalType === 'add_contact'} onClose={() => setModalType('none')} title="New Contact">
+        <div className="space-y-6">
+          <input type="text" placeholder="Contact Name" className="w-full glass p-6 rounded-[2rem] focus:outline-none" />
+          <input type="tel" placeholder="Phone Number" className="w-full glass p-6 rounded-[2rem] focus:outline-none" />
+          <button onClick={() => setModalType('none')} className="w-full bg-indigo-600 p-6 rounded-[2rem] font-black uppercase tracking-widest text-white">Save</button>
         </div>
       </Modal>
     </div>

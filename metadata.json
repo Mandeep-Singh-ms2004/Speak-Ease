@@ -1,18 +1,21 @@
 {
   "name": "SpeakEase - AI Accessibility Bridge",
   "short_name": "SpeakEase",
-  "description": "An interactive communication suite for individuals with speech and hearing impairments. Features real-time AI sign language recognition, multimodal translation, and location-based emergency discovery.",
-  "version": "8.0.0",
+  "description": "A high-fidelity communication suite for speech and hearing impairments. Features real-time AI sign language recognition, multimodal STT/TTS, and precision location-based emergency discovery.",
+  "version": "8.1.0",
   "categories": [
     "Accessibility",
     "Communication",
     "AI"
   ],
+  "display": "standalone",
+  "start_url": "/",
+  "orientation": "portrait",
   "requestFramePermissions": [
     "camera",
     "microphone",
     "geolocation"
   ],
-  "theme_color": "#4f46e5",
+  "theme_color": "#6366f1",
   "background_color": "#020617"
 }

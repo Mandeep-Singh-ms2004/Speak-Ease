@@ -5,6 +5,11 @@ export interface AppLanguage {
   nativeName: string;
 }
 
+export interface EmergencyContact {
+  name: string;
+  phone: string;
+}
+
 export interface User {
   id: string;
   name: string;
@@ -12,6 +17,7 @@ export interface User {
   phone?: string;
   photoURL?: string;
   authMethod: 'google' | 'phone' | 'guest';
+  emergencyContacts?: EmergencyContact[];
 }
 
 export interface QuickPhrase {
@@ -33,4 +39,5 @@ export interface Message {
 export interface LocationData {
   latitude: number;
   longitude: number;
+  address?: string;
 }

@@ -36,26 +36,6 @@ export const translateText = async (text: string, targetLang: string): Promise<s
 };
 
 /**
- * Transliterates phonetic/romanized text into the target script.
- */
-export const transliterateText = async (text: string, targetLang: string): Promise<string> => {
-  if (!text || !targetLang) return text;
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `Transliterate the following romanized/phonetic text into ${targetLang} script. 
-      Example: "namaste" in Hindi -> "नमस्ते".
-      Text: "${text}"
-      Respond ONLY with the transliterated text.`
-    });
-    return response.text?.trim() || text;
-  } catch (e) {
-    return text;
-  }
-};
-
-/**
  * Fetches nearby essential services using Google Maps grounding.
  */
 export const getNearbyPlaces = async (lat: number, lng: number, targetLang: string): Promise<{ text: string, links: any[] }> => {
@@ -77,39 +57,16 @@ export const getNearbyPlaces = async (lat: number, lng: number, targetLang: stri
 
     const text = response.text || "No essential services found nearby.";
     const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-    const links = chunks.map((chunk: any) => chunk.maps).filter(Boolean);
+    
+    // Correctly extracting maps links as per groundingChunks structure
+    const links = chunks
+      .map((chunk: any) => chunk.maps)
+      .filter(Boolean);
 
     return { text, links };
   } catch (e) {
     console.error("Maps grounding error:", e);
-    return { text: "Error fetching nearby places.", links: [] };
-  }
-};
-
-/**
- * Fetches structured UI translations for a given language.
- */
-export const fetchUITranslations = async (targetLang: string, keys: string[], values: string[]): Promise<Record<string, string>> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `Translate these UI labels into ${targetLang}. 
-      Labels: ${values.join(', ')}`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: keys.reduce((acc, key) => ({ ...acc, [key]: { type: Type.STRING } }), {}),
-          required: keys
-        },
-        temperature: 0.1 // Lower temperature for faster, more consistent output
-      }
-    });
-    return JSON.parse(response.text || "{}");
-  } catch (e) {
-    console.error("Translation Error:", e);
-    return {};
+    return { text: "Error fetching nearby places. Please check network.", links: [] };
   }
 };
 
@@ -142,7 +99,7 @@ export const findLanguageDetails = async (langName: string): Promise<{ code: str
 };
 
 /**
- * Interprets a sign language gesture from an image.
+ * Interprets a sign language gesture from an image using Gemini 3 Pro.
  */
 export const interpretSignLanguage = async (imageBlob: Blob, targetLangName: string = "English"): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -162,19 +119,19 @@ export const interpretSignLanguage = async (imageBlob: Blob, targetLangName: str
       contents: {
         parts: [
           { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-          { text: `Analyze this sign gesture. Respond with ONLY the interpreted word/phrase in ${targetLangName}.` }
+          { text: `Analyze this sign gesture. Respond with ONLY the interpreted word/phrase in ${targetLangName}. Be extremely concise.` }
         ]
       },
       config: {
         thinkingConfig: { thinkingBudget: 16000 },
         temperature: 0.1,
-        systemInstruction: `You are an expert Sign Language interpreter. Be concise and accurate.`
+        systemInstruction: `You are an expert Sign Language interpreter. Accurately detect hands and interpret gestures into meaningful phrases.`
       }
     });
 
     return response.text?.trim() || "Recognition failed.";
   } catch (error) {
-    console.error("Gemini Error:", error);
+    console.error("Gemini Vision Error:", error);
     return "Error interpreting sign.";
   }
 };
